@@ -305,12 +305,24 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
             // chord, and the JS bridge the menu UI needs. It keeps the framework's C ABI,
             // so the rest of zero-native is unchanged.
             .system => {
-                const c17 = "-std=c++17";
-                const wv = if (webview2_include) |inc| b.fmt("-I{s}", .{inc}) else null;
-                const wr = if (winrt_include) |inc| b.fmt("-I{s}", .{inc}) else null;
-                const win_flags: []const []const u8 =
-                    if (wv != null and wr != null) &.{ c17, wv.?, wr.? } else if (wv != null) &.{ c17, wv.? } else if (wr != null) &.{ c17, wr.? } else &.{c17};
-                app_mod.addCSourceFile(.{ .file = b.path("native/webview2_host.cpp"), .flags = win_flags });
+                // WebView2 + WRL (wrl.h) is MSVC-flavored C++: Zig's bundled clang
+                // can't build the Windows SDK winrt headers, and its libc++abi
+                // collides with MSVC's vcruntime on the msvc ABI (the "sub-
+                // compilation of libcxxabi failed" / conflicting type_info error).
+                // So compile the host with the real MSVC compiler — cl.exe, on PATH
+                // in an x64 Native Tools prompt or the CI msvc-dev-cmd environment —
+                // and link the resulting object. cl.exe resolves the Windows SDK,
+                // winrt (wrl.h), and STL headers from %INCLUDE%; only the WebView2
+                // SDK headers (from NuGet) need to be passed in. /MD matches the
+                // dynamic UCRT Zig links for the msvc target.
+                const cl = b.addSystemCommand(&.{ "cl", "/nologo", "/c", "/std:c++17", "/EHsc", "/MD", "/O2" });
+                if (webview2_include) |inc| cl.addArg(b.fmt("/I{s}", .{inc}));
+                // winrt is already on cl's %INCLUDE%; pass it too if provided, as a
+                // belt-and-suspenders for setups where it isn't.
+                if (winrt_include) |inc| cl.addArg(b.fmt("/I{s}", .{inc}));
+                const host_obj = cl.addPrefixedOutputFileArg("/Fo", "webview2_host.obj");
+                cl.addFileArg(b.path("native/webview2_host.cpp"));
+                app_mod.addObjectFile(host_obj);
             },
             .chromium => {
                 const cef_check = addCefCheck(b, target, cef_dir);
@@ -327,11 +339,19 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
             },
         }
         app_mod.linkSystemLibrary("c", .{});
-        app_mod.linkSystemLibrary("c++", .{});
+        if (web_engine == .chromium) {
+            // The CEF host is compiled by Zig, so it uses Zig's libc++.
+            app_mod.linkSystemLibrary("c++", .{});
+            app_mod.linkSystemLibrary("libcef", .{});
+        } else {
+            // The WebView2 host is compiled by cl.exe (/MD), so its C++ standard
+            // library comes from MSVC's dynamic runtime (msvcprt.lib), not Zig's
+            // libc++ — whose libc++abi can't build against the MSVC vcruntime ABI.
+            app_mod.linkSystemLibrary("msvcprt", .{});
+        }
         app_mod.linkSystemLibrary("user32", .{});
         app_mod.linkSystemLibrary("ole32", .{});
         app_mod.linkSystemLibrary("shell32", .{});
-        if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
     }
 }
 
