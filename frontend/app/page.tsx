@@ -34,6 +34,15 @@ type KeyPartyBridge = {
 const keyPartyBridge = (): KeyPartyBridge | undefined =>
   (window as unknown as { keyparty?: KeyPartyBridge }).keyparty;
 
+// Where the downloadable desktop app lives. Shown only in the browser build,
+// which can't lock the keyboard the way the native kiosk shell does.
+const RELEASES_URL = "https://github.com/KurtGokhan/KeyParty/releases";
+
+// Set by the GitHub Pages deploy workflow; unset in the native app build. Lets
+// the web build show the "download the app" note and hide Quit deterministically
+// (no first-paint flicker), while still falling back to runtime shell detection.
+const IS_WEB_BUILD = process.env.NEXT_PUBLIC_WEB_BUILD === "1";
+
 type Shape = "circle" | "star" | "square" | "triangle" | "ring";
 
 type Particle = {
@@ -144,7 +153,9 @@ export default function Home() {
   // re-running the effect); React renders the menu off the `mode` state.
   const [mode, setMode] = useState<Mode>("menu");
   const modeRef = useRef<Mode>("menu");
-  const [hasNative, setHasNative] = useState(false);
+  // null = not yet determined (avoids flashing the wrong banner on first paint);
+  // true = native shell present; false = plain browser build.
+  const [hasNative, setHasNative] = useState<boolean | null>(null);
   const [accessibility, setAccessibility] = useState<AccessibilityStatus | null>(null);
   // Imperative hooks into the game engine, published by the game effect.
   const engineRef = useRef<{ enterPlaying: () => void; returnToMenu: () => void } | null>(null);
@@ -1196,7 +1207,10 @@ export default function Home() {
     };
   }, []);
 
-  const showAccess = hasNative && accessibility?.kioskEnabled;
+  // "Web" = the Pages build, or (as a fallback) any run with no native shell.
+  const isWeb = IS_WEB_BUILD || hasNative === false;
+  const showAccess = hasNative === true && accessibility?.kioskEnabled;
+  const showWebNote = isWeb;
 
   return (
     <div className={mode === "menu" ? "stage stage-menu" : "stage"}>
@@ -1220,9 +1234,13 @@ export default function Home() {
               <button type="button" className="btn btn-start" onClick={handleStart} autoFocus>
                 ▶ Start
               </button>
-              <button type="button" className="btn btn-quit" onClick={handleQuit}>
-                ✕ Quit
-              </button>
+              {/* Quit closes the native app; in the browser there's nothing to
+                  quit (and window.close() is a no-op for normal tabs), so hide it. */}
+              {!isWeb && (
+                <button type="button" className="btn btn-quit" onClick={handleQuit}>
+                  ✕ Quit
+                </button>
+              )}
             </div>
 
             {showAccess && (
@@ -1247,6 +1265,19 @@ export default function Home() {
                     </span>
                   </>
                 )}
+              </div>
+            )}
+
+            {showWebNote && (
+              <div className="web-note">
+                <span className="access-line">
+                  🌐 You’re playing in the browser. KeyParty works best as the desktop app —
+                  the browser can’t lock the keyboard, so a child can still press a shortcut and
+                  slip out of the game.
+                </span>
+                <a className="btn btn-download" href={RELEASES_URL} target="_blank" rel="noreferrer">
+                  ⬇ Download the app
+                </a>
               </div>
             )}
 
