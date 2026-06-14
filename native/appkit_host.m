@@ -1,0 +1,2119 @@
+#import "appkit_host.h"
+
+#import <AppKit/AppKit.h>
+#import <WebKit/WebKit.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <string.h>
+
+// We need a handful of CGEvent.h functions (CGEventTapCreate, …) and
+// CGShieldingWindowLevel for the global key-blocking event tap. We deliberately
+// do NOT #import <CoreGraphics/CGEvent.h> or the ApplicationServices umbrella:
+// those headers transitively pull ColorSync/QuickDraw/tone-mapping declarations
+// that this SDK can't compile at a macOS 11 deployment target.
+//
+// The CGEventTypes.h types and constants we use (CGEventRef, CGEventType,
+// CGEventTapProxy, CGEventFlags, CGEventMask, CGKeyCode, the kCGEvent* /
+// kCGEventFlagMask* / kCG*EventTap* / kCGKeyboardEvent* constants) and the
+// Accessibility symbols (AXIsProcessTrustedWithOptions,
+// kAXTrustedCheckOptionPrompt) are already visible here through AppKit's
+// transitive includes, so we use them directly.
+//
+// We must declare the missing functions WITHOUT naming any CoreGraphics type
+// that isn't already visible: under clang modules, referencing an unknown type
+// (e.g. CGEventTapCallBack or CGWindowLevel) makes clang auto-import the
+// CoreGraphics/QuickDraw module and drag those uncompilable headers into this
+// translation unit. So the tap callback is spelled as an explicit function
+// pointer over already-visible types, the tap-create enum args use their
+// underlying uint32_t, and the shielding level uses its underlying int32_t.
+// The symbols themselves resolve by linking CoreGraphics + ApplicationServices.
+extern CFMachPortRef CGEventTapCreate(uint32_t tap, uint32_t place, uint32_t options,
+                                      CGEventMask eventsOfInterest,
+                                      CGEventRef (*callback)(CGEventTapProxy, CGEventType, CGEventRef, void *),
+                                      void *userInfo);
+extern void CGEventTapEnable(CFMachPortRef tap, bool enable);
+extern CGEventFlags CGEventGetFlags(CGEventRef event);
+extern int64_t CGEventGetIntegerValueField(CGEventRef event, uint32_t field);
+extern int32_t CGShieldingWindowLevel(void);
+
+// kCGHeadInsertEventTap and kCGEventTapOptionDefault already leak in via
+// CGEventTypes.h, but kCGHIDEventTapLocation does not; define just that one (it
+// is the first CGEventTapLocation value). Defining it here also stops clang from
+// trying to auto-import CoreGraphics to resolve the otherwise-undeclared name.
+enum { kCGHIDEventTapLocation = 0 };
+
+@class ZeroNativeAppKitHost;
+
+static const NSUInteger ZeroNativeMaxChildWebViews = 16;
+// KeyParty: full-screen kiosk lockdown is on by default. Set KEYPARTY_NO_KIOSK=1
+// to run the game in a normal resizable window (useful for development).
+static BOOL ZeroNativeKeyPartyKioskEnabled(void);
+// KeyParty: global keyboard tap that swallows every shortcut system-wide and
+// forwards each key to the game. Defined near the bottom of this file.
+static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo);
+static NSRect constrainFrame(NSRect frame);
+static NSString *ZeroNativeAppKitBridgeScript(void);
+static NSString *ZeroNativeMimeTypeForPath(NSString *path);
+static NSString *ZeroNativeResolvedAssetRoot(NSString *rootPath);
+static NSString *ZeroNativeSafeAssetPath(NSURL *url, NSString *entryPath);
+static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath);
+static NSArray<NSString *> *ZeroNativePolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback);
+static NSString *ZeroNativeOriginForURL(NSURL *url);
+static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url);
+
+@interface ZeroNativeWindowDelegate : NSObject <NSWindowDelegate>
+@property(nonatomic, assign) ZeroNativeAppKitHost *host;
+@property(nonatomic, assign) uint64_t windowId;
+@end
+
+@interface ZeroNativeWebView : WKWebView
+@property(nonatomic, strong) NSArray<NSValue *> *coveredMouseRects;
+@end
+
+// KeyParty kiosk window: a borderless, shield-level window that must cover the
+// ENTIRE screen, menu bar included. AppKit normally constrains a window's frame
+// so its title bar can't slide under the menu bar — which would shove this
+// window down and leave the menu-bar strip showing the desktop. We override
+// that to keep the frame exactly as set, and allow a borderless window to still
+// become key/main so the web view behaves normally.
+@interface ZeroNativeKioskWindow : NSWindow
+@end
+
+@implementation ZeroNativeKioskWindow
+- (BOOL)canBecomeKeyWindow {
+    return YES;
+}
+- (BOOL)canBecomeMainWindow {
+    return YES;
+}
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen {
+    (void)screen;
+    return frameRect; // never push the window down below the menu bar
+}
+@end
+
+@interface ZeroNativeBridgeScriptHandler : NSObject <WKScriptMessageHandler>
+@property(nonatomic, assign) ZeroNativeAppKitHost *host;
+@property(nonatomic, assign) uint64_t windowId;
+@property(nonatomic, strong) NSString *webViewLabel;
+@end
+
+@interface ZeroNativeAssetSchemeHandler : NSObject <WKURLSchemeHandler>
+@property(nonatomic, strong) NSString *rootPath;
+@property(nonatomic, strong) NSString *entryPath;
+@property(nonatomic, assign) BOOL spaFallback;
+- (void)configureWithRootPath:(NSString *)rootPath entryPath:(NSString *)entryPath spaFallback:(BOOL)spaFallback;
+@end
+
+@interface ZeroNativeAppKitHost : NSObject <WKNavigationDelegate>
+@property(nonatomic, strong) NSWindow *window;
+@property(nonatomic, strong) WKWebView *webView;
+@property(nonatomic, strong) ZeroNativeWindowDelegate *delegate;
+@property(nonatomic, strong) ZeroNativeBridgeScriptHandler *bridgeScriptHandler;
+@property(nonatomic, strong) ZeroNativeAssetSchemeHandler *assetSchemeHandler;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSWindow *> *windows;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, WKWebView *> *webViews;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, ZeroNativeWindowDelegate *> *delegates;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, ZeroNativeBridgeScriptHandler *> *bridgeScriptHandlers;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, ZeroNativeAssetSchemeHandler *> *assetSchemeHandlers;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *windowLabels;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *childWebViews;
+@property(nonatomic, strong) NSMutableSet<NSString *> *bridgeEnabledChildWebViewKeys;
+@property(nonatomic, strong) NSTimer *timer;
+@property(nonatomic, strong) NSString *appName;
+@property(nonatomic, strong) NSString *bundleIdentifier;
+@property(nonatomic, strong) NSString *iconPath;
+@property(nonatomic, strong) NSString *windowLabel;
+@property(nonatomic, assign) zero_native_appkit_event_callback_t callback;
+@property(nonatomic, assign) zero_native_appkit_bridge_callback_t bridgeCallback;
+@property(nonatomic, assign) void *context;
+@property(nonatomic, assign) void *bridgeContext;
+@property(nonatomic, assign) BOOL didShutdown;
+@property(nonatomic, assign) NSInteger bridgeFrameKeepalive;
+@property(nonatomic, strong) id shortcutEventMonitor;
+@property(nonatomic, assign) CFMachPortRef eventTap;
+@property(nonatomic, assign) CFRunLoopSourceRef eventTapSource;
+@property(nonatomic, assign) CGEventFlags previousFlags;
+@property(nonatomic, strong) NSTimer *accessibilityRetryTimer;
+@property(nonatomic, strong) NSStatusItem *statusItem;
+@property(nonatomic, assign) zero_native_appkit_tray_callback_t trayCallback;
+@property(nonatomic, assign) void *trayContext;
+@property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
+@property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
+@property(nonatomic, assign) NSInteger externalLinkAction;
+- (instancetype)initWithAppName:(NSString *)appName windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame;
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame makeMain:(BOOL)makeMain;
+- (void)focusWindowWithId:(uint64_t)windowId;
+- (void)closeWindowWithId:(uint64_t)windowId;
+- (WKWebView *)webViewForWindowId:(uint64_t)windowId;
+- (WKWebView *)mainWebViewForWindow:(NSWindow *)window;
+- (ZeroNativeAssetSchemeHandler *)assetHandlerForWindowId:(uint64_t)windowId;
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
+- (BOOL)setWebViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
+- (BOOL)navigateWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url;
+- (BOOL)setWebViewZoomInWindow:(uint64_t)windowId label:(NSString *)label zoom:(double)zoom;
+- (BOOL)setWebViewLayerInWindow:(uint64_t)windowId label:(NSString *)label layer:(NSInteger)layer;
+- (BOOL)closeWebViewInWindow:(uint64_t)windowId label:(NSString *)label;
+- (void)closeWebViewsInWindow:(uint64_t)windowId;
+- (void)reorderWebViewsInWindow:(uint64_t)windowId;
+- (void)updateCoveredMouseRectsInWindow:(uint64_t)windowId;
+- (void)applyCoveredMouseRects:(NSArray<NSValue *> *)rects toWebView:(WKWebView *)webView;
+- (void)removeBridgeHandlerForChildWebView:(WKWebView *)webView key:(NSString *)key;
+- (void)removeAllChildBridgeHandlers;
+- (void)configureApplication;
+- (void)buildMenuBar;
+- (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
+- (void)runWithCallback:(zero_native_appkit_event_callback_t)callback context:(void *)context;
+- (void)stop;
+- (void)emitEvent:(zero_native_appkit_event_t)event;
+- (void)emitResize;
+- (void)emitResizeForWindowId:(uint64_t)windowId;
+- (void)emitDeferredResizeForWindowId:(uint64_t)windowId;
+- (void)emitWindowFrame:(BOOL)open;
+- (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open;
+- (void)scheduleFrame;
+- (void)scheduleBridgeFrames;
+- (void)emitFrame;
+- (void)emitShutdown;
+- (void)loadSource:(NSString *)source kind:(NSInteger)kind assetRoot:(NSString *)assetRoot entry:(NSString *)entry origin:(NSString *)origin spaFallback:(BOOL)spaFallback;
+- (void)loadSource:(NSString *)source kind:(NSInteger)kind assetRoot:(NSString *)assetRoot entry:(NSString *)entry origin:(NSString *)origin spaFallback:(BOOL)spaFallback windowId:(uint64_t)windowId;
+- (void)setAllowedNavigationOrigins:(NSArray<NSString *> *)origins externalURLs:(NSArray<NSString *> *)externalURLs externalAction:(NSInteger)externalAction;
+- (BOOL)allowsNavigationURL:(NSURL *)url;
+- (BOOL)openExternalURLIfAllowed:(NSURL *)url;
+- (void)emitNavigationForWebView:(WKWebView *)webView url:(NSURL *)url;
+- (void)receiveBridgeMessage:(WKScriptMessage *)message windowId:(uint64_t)windowId webViewLabel:(NSString *)webViewLabel;
+- (void)completeBridgeWithResponse:(NSString *)response;
+- (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId;
+- (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId webViewLabel:(NSString *)webViewLabel;
+- (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId;
+- (BOOL)handleShortcutEvent:(NSEvent *)event;
+- (void)applyKioskPresentation;
+- (BOOL)installGlobalEventTap;
+- (void)removeGlobalEventTap;
+- (void)startAccessibilityRetry;
+- (void)forwardKeyToGameWithCode:(NSString *)code key:(NSString *)key repeat:(BOOL)repeat ctrl:(BOOL)ctrl alt:(BOOL)alt meta:(BOOL)meta shift:(BOOL)shift;
+- (void)forwardKeyUpToGameWithCode:(NSString *)code;
+@end
+
+@implementation ZeroNativeWindowDelegate
+
+- (void)windowDidResize:(NSNotification *)notification {
+    (void)notification;
+    [self.host emitWindowFrameForWindowId:self.windowId open:YES];
+    [self.host emitResizeForWindowId:self.windowId];
+    [self.host emitDeferredResizeForWindowId:self.windowId];
+    [self.host scheduleFrame];
+}
+
+- (void)windowDidMove:(NSNotification *)notification {
+    (void)notification;
+    [self.host emitWindowFrameForWindowId:self.windowId open:YES];
+    [self.host scheduleFrame];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    (void)notification;
+    [self.host applyKioskPresentation];
+    [self.host emitWindowFrameForWindowId:self.windowId open:YES];
+    [self.host emitResizeForWindowId:self.windowId];
+    [self.host emitDeferredResizeForWindowId:self.windowId];
+    [self.host scheduleFrame];
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    (void)notification;
+    [self.host emitWindowFrameForWindowId:self.windowId open:NO];
+    [self.host closeWebViewsInWindow:self.windowId];
+    NSNumber *key = @(self.windowId);
+    [self.host.windows removeObjectForKey:key];
+    [self.host.webViews removeObjectForKey:key];
+    [self.host.delegates removeObjectForKey:key];
+    [self.host.bridgeScriptHandlers removeObjectForKey:key];
+    [self.host.assetSchemeHandlers removeObjectForKey:key];
+    [self.host.windowLabels removeObjectForKey:key];
+    if (self.host.windows.count == 0) {
+        [self.host emitShutdown];
+        [self.host stop];
+    }
+}
+
+@end
+
+@implementation ZeroNativeWebView
+
+- (BOOL)pointIsCovered:(NSPoint)point {
+    for (NSValue *value in self.coveredMouseRects) {
+        if (NSPointInRect(point, value.rectValue)) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)eventIsCovered:(NSEvent *)event {
+    if (!event) return NO;
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    return [self pointIsCovered:point];
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+    if ([self pointIsCovered:point]) return nil;
+    return [super hitTest:point];
+}
+
+- (void)mouseEntered:(NSEvent *)event { if (![self eventIsCovered:event]) [super mouseEntered:event]; }
+- (void)mouseExited:(NSEvent *)event { if (![self eventIsCovered:event]) [super mouseExited:event]; }
+- (void)mouseMoved:(NSEvent *)event { if (![self eventIsCovered:event]) [super mouseMoved:event]; }
+- (void)mouseDown:(NSEvent *)event { if (![self eventIsCovered:event]) [super mouseDown:event]; }
+- (void)mouseUp:(NSEvent *)event { if (![self eventIsCovered:event]) [super mouseUp:event]; }
+- (void)mouseDragged:(NSEvent *)event { if (![self eventIsCovered:event]) [super mouseDragged:event]; }
+- (void)rightMouseDown:(NSEvent *)event { if (![self eventIsCovered:event]) [super rightMouseDown:event]; }
+- (void)rightMouseUp:(NSEvent *)event { if (![self eventIsCovered:event]) [super rightMouseUp:event]; }
+
+@end
+
+@implementation ZeroNativeBridgeScriptHandler
+
+- (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
+    (void)userContentController;
+    [self.host receiveBridgeMessage:message windowId:self.windowId webViewLabel:self.webViewLabel ?: @"main"];
+}
+
+@end
+
+@implementation ZeroNativeAssetSchemeHandler
+
+- (instancetype)init {
+    self = [super init];
+    if (!self) return nil;
+    self.rootPath = @"";
+    self.entryPath = @"index.html";
+    self.spaFallback = YES;
+    return self;
+}
+
+- (void)configureWithRootPath:(NSString *)rootPath entryPath:(NSString *)entryPath spaFallback:(BOOL)spaFallback {
+    self.rootPath = ZeroNativeResolvedAssetRoot(rootPath ?: @"");
+    self.entryPath = entryPath.length > 0 ? entryPath : @"index.html";
+    self.spaFallback = spaFallback;
+}
+
+- (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask {
+    (void)webView;
+    NSString *relativePath = ZeroNativeSafeAssetPath(urlSchemeTask.request.URL, self.entryPath);
+    if (!relativePath) {
+        NSError *error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorBadURL userInfo:nil];
+        [urlSchemeTask didFailWithError:error];
+        return;
+    }
+
+    NSString *filePath = [self.rootPath stringByAppendingPathComponent:relativePath];
+    BOOL isDirectory = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:filePath isDirectory:&isDirectory] || isDirectory) {
+        if (self.spaFallback) {
+            filePath = [self.rootPath stringByAppendingPathComponent:self.entryPath];
+        }
+    }
+
+    NSData *data = [NSData dataWithContentsOfFile:filePath];
+    if (!data) {
+        NSError *error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorFileDoesNotExist userInfo:nil];
+        [urlSchemeTask didFailWithError:error];
+        return;
+    }
+
+    NSURLResponse *response = [[NSURLResponse alloc] initWithURL:urlSchemeTask.request.URL
+                                                        MIMEType:ZeroNativeMimeTypeForPath(filePath)
+                                           expectedContentLength:(NSInteger)data.length
+                                                textEncodingName:nil];
+    [urlSchemeTask didReceiveResponse:response];
+    [urlSchemeTask didReceiveData:data];
+    [urlSchemeTask didFinish];
+}
+
+- (void)webView:(WKWebView *)webView stopURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask {
+    (void)webView;
+    (void)urlSchemeTask;
+}
+
+@end
+
+@implementation ZeroNativeAppKitHost
+
+- (instancetype)initWithAppName:(NSString *)appName windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame {
+    self = [super init];
+    if (!self) {
+        return nil;
+    }
+
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    self.appName = appName.length > 0 ? appName : @"zero-native";
+    self.bundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : @"dev.zero_native.app";
+    self.iconPath = iconPath ?: @"";
+    self.windowLabel = windowLabel.length > 0 ? windowLabel : @"main";
+    self.windows = [[NSMutableDictionary alloc] init];
+    self.webViews = [[NSMutableDictionary alloc] init];
+    self.delegates = [[NSMutableDictionary alloc] init];
+    self.bridgeScriptHandlers = [[NSMutableDictionary alloc] init];
+    self.assetSchemeHandlers = [[NSMutableDictionary alloc] init];
+    self.windowLabels = [[NSMutableDictionary alloc] init];
+    self.childWebViews = [[NSMutableDictionary alloc] init];
+    self.bridgeEnabledChildWebViewKeys = [[NSMutableSet alloc] init];
+    self.allowedNavigationOrigins = @[ @"zero://app", @"zero://inline" ];
+    self.allowedExternalURLs = @[];
+    self.externalLinkAction = 0;
+    [self configureApplication];
+
+    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame makeMain:YES];
+    self.didShutdown = NO;
+
+    return self;
+}
+
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame makeMain:(BOOL)makeMain {
+    NSNumber *key = @(windowId);
+    if (self.windows[key]) {
+        return NO;
+    }
+
+    NSScreen *screen = [NSScreen mainScreen];
+    NSRect rect = restoreFrame ? NSMakeRect(x, y, width, height) : NSMakeRect(0, 0, width, height);
+    if (restoreFrame) {
+        rect = constrainFrame(rect);
+    }
+
+    // KeyParty kiosk: the main window fills the whole screen with no visible
+    // chrome, so a kid cannot drag, resize, minimise, or close it. Child
+    // windows (if any) keep the framework's normal styling.
+    NSWindowStyleMask styleMask = (NSWindowStyleMaskTitled |
+                                   NSWindowStyleMaskClosable |
+                                   NSWindowStyleMaskResizable |
+                                   NSWindowStyleMaskMiniaturizable);
+    BOOL kiosk = makeMain && screen != nil && ZeroNativeKeyPartyKioskEnabled();
+    if (kiosk) {
+        rect = screen.frame;
+        // Borderless so AppKit doesn't constrain the frame to keep a title bar
+        // below the menu bar; the window then covers the whole screen.
+        styleMask = NSWindowStyleMaskBorderless;
+    }
+
+    NSWindow *window = kiosk
+        ? [[ZeroNativeKioskWindow alloc] initWithContentRect:rect
+                                                   styleMask:styleMask
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO]
+        : [[NSWindow alloc] initWithContentRect:rect
+                                      styleMask:styleMask
+                                        backing:NSBackingStoreBuffered
+                                          defer:NO];
+    [window setTitle:(title.length > 0 ? title : self.appName)];
+    if (kiosk) {
+        window.titleVisibility = NSWindowTitleHidden;
+        window.titlebarAppearsTransparent = YES;
+        window.movable = NO;
+        window.movableByWindowBackground = NO;
+        [window standardWindowButton:NSWindowCloseButton].hidden = YES;
+        [window standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
+        [window standardWindowButton:NSWindowZoomButton].hidden = YES;
+        // Shielding level sits above the menu bar and dock, so the game truly
+        // covers the entire screen (the same level screen savers use).
+        window.level = CGShieldingWindowLevel();
+        window.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone | NSWindowCollectionBehaviorStationary;
+        [window setFrame:rect display:YES];
+    } else if (!restoreFrame) {
+        [window center];
+    }
+
+    WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    ZeroNativeAssetSchemeHandler *assetSchemeHandler = [[ZeroNativeAssetSchemeHandler alloc] init];
+    [configuration setURLSchemeHandler:assetSchemeHandler forURLScheme:@"zero"];
+    WKUserContentController *userContentController = [[WKUserContentController alloc] init];
+    ZeroNativeBridgeScriptHandler *bridgeScriptHandler = [[ZeroNativeBridgeScriptHandler alloc] init];
+    bridgeScriptHandler.host = self;
+    bridgeScriptHandler.windowId = windowId;
+    bridgeScriptHandler.webViewLabel = @"main";
+    [userContentController addScriptMessageHandler:bridgeScriptHandler name:@"zeroNativeBridge"];
+    WKUserScript *bridgeScript = [[WKUserScript alloc] initWithSource:ZeroNativeAppKitBridgeScript()
+                                                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                     forMainFrameOnly:YES];
+    [userContentController addUserScript:bridgeScript];
+    configuration.userContentController = userContentController;
+    if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
+        [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+    }
+    NSView *container = [[NSView alloc] initWithFrame:rect];
+    container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    WKWebView *webView = [[ZeroNativeWebView alloc] initWithFrame:container.bounds configuration:configuration];
+    webView.wantsLayer = YES;
+    webView.layer.zPosition = 0;
+    webView.layer.backgroundColor = NSColor.clearColor.CGColor;
+    [webView setValue:@NO forKey:@"drawsBackground"];
+    if ([webView respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
+        [webView setValue:@YES forKey:@"inspectable"];
+    }
+    webView.navigationDelegate = self;
+    webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [container addSubview:webView positioned:NSWindowAbove relativeTo:nil];
+    window.contentView = container;
+
+    ZeroNativeWindowDelegate *delegate = [[ZeroNativeWindowDelegate alloc] init];
+    delegate.host = self;
+    delegate.windowId = windowId;
+    window.delegate = delegate;
+
+    self.windows[key] = window;
+    self.webViews[key] = webView;
+    self.delegates[key] = delegate;
+    self.bridgeScriptHandlers[key] = bridgeScriptHandler;
+    self.assetSchemeHandlers[key] = assetSchemeHandler;
+    self.windowLabels[key] = label.length > 0 ? label : @"main";
+    if (makeMain) {
+        self.window = window;
+        self.webView = webView;
+        self.delegate = delegate;
+        self.bridgeScriptHandler = bridgeScriptHandler;
+        self.assetSchemeHandler = assetSchemeHandler;
+        self.windowLabel = label.length > 0 ? label : @"main";
+    } else {
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activate];
+    }
+    return YES;
+}
+
+- (void)dealloc {
+    if (self.shortcutEventMonitor) {
+        [NSEvent removeMonitor:self.shortcutEventMonitor];
+        self.shortcutEventMonitor = nil;
+    }
+    [self removeGlobalEventTap];
+    [self removeAllChildBridgeHandlers];
+    for (WKWebView *webView in self.webViews.allValues) {
+        [webView.configuration.userContentController removeScriptMessageHandlerForName:@"zeroNativeBridge"];
+    }
+}
+
+- (void)focusWindowWithId:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activate];
+    [self emitWindowFrameForWindowId:windowId open:YES];
+    [self scheduleFrame];
+}
+
+- (void)closeWindowWithId:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    [window performClose:nil];
+}
+
+- (WKWebView *)webViewForWindowId:(uint64_t)windowId {
+    return self.webViews[@(windowId)] ?: self.webView;
+}
+
+- (WKWebView *)mainWebViewForWindow:(NSWindow *)window {
+    if (!window) return self.webView;
+    for (NSNumber *key in self.windows) {
+        if (self.windows[key] == window) return self.webViews[key] ?: self.webView;
+    }
+    return self.webView;
+}
+
+- (ZeroNativeAssetSchemeHandler *)assetHandlerForWindowId:(uint64_t)windowId {
+    return self.assetSchemeHandlers[@(windowId)] ?: self.assetSchemeHandler;
+}
+
+- (NSString *)webViewKeyForWindow:(uint64_t)windowId label:(NSString *)label {
+    return [NSString stringWithFormat:@"%llu:%@", windowId, label ?: @""];
+}
+
+- (NSRect)webViewFrameForWindow:(NSWindow *)window x:(double)x y:(double)y width:(double)width height:(double)height {
+    NSView *contentView = window.contentView;
+    CGFloat nativeY = contentView.isFlipped ? y : contentView.bounds.size.height - y - height;
+    return NSMakeRect(x, nativeY, width, height);
+}
+
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
+    if (label.length == 0 || url.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
+    NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
+    if (!window || !window.contentView) return NO;
+    NSURL *targetURL = [NSURL URLWithString:url];
+    if (!targetURL) return NO;
+    if (![self allowsNavigationURL:targetURL]) return NO;
+    if (self.childWebViews.count >= ZeroNativeMaxChildWebViews) return NO;
+
+    NSString *key = [self webViewKeyForWindow:windowId label:label];
+    WKWebView *existing = self.childWebViews[key];
+    if (existing) return NO;
+
+    WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    if (bridgeEnabled) {
+        WKUserContentController *controller = [[WKUserContentController alloc] init];
+        ZeroNativeBridgeScriptHandler *handler = [[ZeroNativeBridgeScriptHandler alloc] init];
+        handler.host = self;
+        handler.windowId = windowId;
+        handler.webViewLabel = label;
+        [controller addScriptMessageHandler:handler name:@"zeroNativeBridge"];
+        [controller addUserScript:[[WKUserScript alloc] initWithSource:ZeroNativeAppKitBridgeScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+        configuration.userContentController = controller;
+    }
+    if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
+        [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+    }
+
+    WKWebView *webview = [[ZeroNativeWebView alloc] initWithFrame:[self webViewFrameForWindow:window x:x y:y width:width height:height] configuration:configuration];
+    webview.wantsLayer = YES;
+    webview.layer.zPosition = layer;
+    if (transparent) {
+        webview.layer.backgroundColor = NSColor.clearColor.CGColor;
+        [webview setValue:@NO forKey:@"drawsBackground"];
+    }
+    if ([webview respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
+        [webview setValue:@YES forKey:@"inspectable"];
+    }
+    webview.navigationDelegate = self;
+    webview.autoresizingMask = NSViewNotSizable;
+    [window.contentView addSubview:webview positioned:NSWindowAbove relativeTo:nil];
+    [webview loadRequest:[NSURLRequest requestWithURL:targetURL]];
+    self.childWebViews[key] = webview;
+    if (bridgeEnabled) [self.bridgeEnabledChildWebViewKeys addObject:key];
+    [self reorderWebViewsInWindow:windowId];
+    [self scheduleBridgeFrames];
+    return YES;
+}
+
+- (BOOL)setWebViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height {
+    if (label.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
+    NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
+    if ([label isEqualToString:@"main"]) {
+        WKWebView *webView = [self webViewForWindowId:windowId];
+        if (!window || !webView) return NO;
+        webView.autoresizingMask = NSViewNotSizable;
+        webView.frame = [self webViewFrameForWindow:window x:x y:y width:width height:height];
+        [self reorderWebViewsInWindow:windowId];
+        [self scheduleBridgeFrames];
+        return YES;
+    }
+    WKWebView *webview = self.childWebViews[[self webViewKeyForWindow:windowId label:label]];
+    if (!window || !webview) return NO;
+    webview.frame = [self webViewFrameForWindow:window x:x y:y width:width height:height];
+    [self reorderWebViewsInWindow:windowId];
+    [self scheduleBridgeFrames];
+    return YES;
+}
+
+- (BOOL)navigateWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url {
+    if (label.length == 0 || url.length == 0) return NO;
+    NSURL *targetURL = [NSURL URLWithString:url ?: @""];
+    if ([label isEqualToString:@"main"]) {
+        WKWebView *webView = [self webViewForWindowId:windowId];
+        if (!webView || !targetURL) return NO;
+        if (![self allowsNavigationURL:targetURL]) return NO;
+        [webView loadRequest:[NSURLRequest requestWithURL:targetURL]];
+        [self scheduleBridgeFrames];
+        return YES;
+    }
+    WKWebView *webview = self.childWebViews[[self webViewKeyForWindow:windowId label:label]];
+    if (!webview || !targetURL) return NO;
+    if (![self allowsNavigationURL:targetURL]) return NO;
+    [webview loadRequest:[NSURLRequest requestWithURL:targetURL]];
+    [self scheduleBridgeFrames];
+    return YES;
+}
+
+- (BOOL)setWebViewZoomInWindow:(uint64_t)windowId label:(NSString *)label zoom:(double)zoom {
+    if (label.length == 0 || zoom < 0.25 || zoom > 5.0) return NO;
+    if ([label isEqualToString:@"main"]) {
+        WKWebView *webView = [self webViewForWindowId:windowId];
+        if (!webView) return NO;
+        webView.pageZoom = zoom;
+        return YES;
+    }
+    WKWebView *webview = self.childWebViews[[self webViewKeyForWindow:windowId label:label]];
+    if (!webview) return NO;
+    webview.pageZoom = zoom;
+    return YES;
+}
+
+- (BOOL)setWebViewLayerInWindow:(uint64_t)windowId label:(NSString *)label layer:(NSInteger)layer {
+    if (label.length == 0) return NO;
+    if ([label isEqualToString:@"main"]) {
+        WKWebView *webView = [self webViewForWindowId:windowId];
+        if (!webView) return NO;
+        webView.wantsLayer = YES;
+        webView.layer.zPosition = layer;
+        [self reorderWebViewsInWindow:windowId];
+        return YES;
+    }
+    WKWebView *webview = self.childWebViews[[self webViewKeyForWindow:windowId label:label]];
+    if (!webview) return NO;
+    webview.wantsLayer = YES;
+    webview.layer.zPosition = layer;
+    [self reorderWebViewsInWindow:windowId];
+    return YES;
+}
+
+- (BOOL)closeWebViewInWindow:(uint64_t)windowId label:(NSString *)label {
+    NSString *key = [self webViewKeyForWindow:windowId label:label];
+    WKWebView *webview = self.childWebViews[key];
+    if (!webview) return NO;
+    [self removeBridgeHandlerForChildWebView:webview key:key];
+    [webview removeFromSuperview];
+    [self.childWebViews removeObjectForKey:key];
+    [self reorderWebViewsInWindow:windowId];
+    [self scheduleBridgeFrames];
+    return YES;
+}
+
+- (void)closeWebViewsInWindow:(uint64_t)windowId {
+    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
+    NSArray<NSString *> *keys = [self.childWebViews.allKeys copy];
+    for (NSString *key in keys) {
+        if (![key hasPrefix:prefix]) continue;
+        WKWebView *webview = self.childWebViews[key];
+        [self removeBridgeHandlerForChildWebView:webview key:key];
+        [webview removeFromSuperview];
+        [self.childWebViews removeObjectForKey:key];
+    }
+    [self reorderWebViewsInWindow:windowId];
+}
+
+- (void)reorderWebViewsInWindow:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
+    NSView *contentView = window.contentView;
+    if (!contentView) return;
+
+    NSMutableArray<NSView *> *views = [[NSMutableArray alloc] init];
+    WKWebView *mainWebView = self.webViews[@(windowId)];
+    if (mainWebView && mainWebView.superview == contentView) {
+        [views addObject:mainWebView];
+    }
+
+    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
+    for (NSString *key in self.childWebViews) {
+        if (![key hasPrefix:prefix]) continue;
+        WKWebView *view = self.childWebViews[key];
+        if (view && view.superview == contentView) {
+            [views addObject:view];
+        }
+    }
+
+    [views sortUsingComparator:^NSComparisonResult(NSView *first, NSView *second) {
+        CGFloat firstLayer = first.layer.zPosition;
+        CGFloat secondLayer = second.layer.zPosition;
+        if (firstLayer < secondLayer) return NSOrderedAscending;
+        if (firstLayer > secondLayer) return NSOrderedDescending;
+        NSUInteger firstIndex = [contentView.subviews indexOfObjectIdenticalTo:first];
+        NSUInteger secondIndex = [contentView.subviews indexOfObjectIdenticalTo:second];
+        if (firstIndex < secondIndex) return NSOrderedAscending;
+        if (firstIndex > secondIndex) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    NSView *previous = nil;
+    for (NSView *view in views) {
+        [contentView addSubview:view positioned:NSWindowAbove relativeTo:previous];
+        previous = view;
+    }
+    [self updateCoveredMouseRectsInWindow:windowId];
+}
+
+- (void)updateCoveredMouseRectsInWindow:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
+    NSView *contentView = window.contentView;
+    if (!contentView) return;
+
+    NSMutableArray<NSView *> *views = [[NSMutableArray alloc] init];
+    WKWebView *mainWebView = self.webViews[@(windowId)];
+    if ([mainWebView isKindOfClass:[ZeroNativeWebView class]] && mainWebView.superview == contentView) {
+        [views addObject:mainWebView];
+    }
+
+    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
+    for (NSString *key in self.childWebViews) {
+        if (![key hasPrefix:prefix]) continue;
+        WKWebView *webView = self.childWebViews[key];
+        if ([webView isKindOfClass:[ZeroNativeWebView class]] && webView.superview == contentView) {
+            [views addObject:webView];
+        }
+    }
+
+    [views sortUsingComparator:^NSComparisonResult(NSView *first, NSView *second) {
+        CGFloat firstLayer = first.layer.zPosition;
+        CGFloat secondLayer = second.layer.zPosition;
+        if (firstLayer < secondLayer) return NSOrderedAscending;
+        if (firstLayer > secondLayer) return NSOrderedDescending;
+        NSUInteger firstIndex = [contentView.subviews indexOfObjectIdenticalTo:first];
+        NSUInteger secondIndex = [contentView.subviews indexOfObjectIdenticalTo:second];
+        if (firstIndex < secondIndex) return NSOrderedAscending;
+        if (firstIndex > secondIndex) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    for (NSUInteger index = 0; index < views.count; index++) {
+        ZeroNativeWebView *webView = (ZeroNativeWebView *)views[index];
+        NSMutableArray<NSValue *> *coveredRects = [[NSMutableArray alloc] init];
+        for (NSUInteger coverIndex = index + 1; coverIndex < views.count; coverIndex++) {
+            NSView *coveringView = views[coverIndex];
+            NSRect intersection = NSIntersectionRect(webView.frame, coveringView.frame);
+            if (NSIsEmptyRect(intersection)) continue;
+            [coveredRects addObject:[NSValue valueWithRect:[webView convertRect:intersection fromView:contentView]]];
+        }
+        webView.coveredMouseRects = coveredRects;
+        [self applyCoveredMouseRects:coveredRects toWebView:webView];
+    }
+}
+
+- (void)applyCoveredMouseRects:(NSArray<NSValue *> *)rects toWebView:(WKWebView *)webView {
+    NSMutableString *rectsJson = [[NSMutableString alloc] initWithString:@"["];
+    for (NSUInteger index = 0; index < rects.count; index++) {
+        NSRect rect = rects[index].rectValue;
+        CGFloat x = rect.origin.x;
+        CGFloat y = webView.isFlipped ? rect.origin.y : webView.bounds.size.height - rect.origin.y - rect.size.height;
+        if (index > 0) [rectsJson appendString:@","];
+        [rectsJson appendFormat:@"{\"x\":%.3f,\"y\":%.3f,\"width\":%.3f,\"height\":%.3f}", x, y, rect.size.width, rect.size.height];
+    }
+    [rectsJson appendString:@"]"];
+
+    // WKWebView can keep CSS hover active via internal tracking even after
+    // AppKit hit-testing excludes the view, so mirror native coverage into the
+    // document as transparent fixed-position event covers.
+    NSString *script = [NSString stringWithFormat:
+        @"(function(rects){"
+         "var id='__zero_native_covered_mouse_rects__';"
+         "var root=document.getElementById(id);"
+         "if(!rects.length){if(root)root.remove();return;}"
+         "var parent=document.documentElement||document.body;"
+         "if(!parent)return;"
+         "if(!root){"
+           "root=document.createElement('div');"
+           "root.id=id;"
+           "root.style.cssText='position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none;';"
+           "parent.appendChild(root);"
+         "}"
+         "root.textContent='';"
+         "rects.forEach(function(r){"
+           "var cover=document.createElement('div');"
+           "cover.style.cssText='position:fixed;left:'+r.x+'px;top:'+r.y+'px;width:'+r.width+'px;height:'+r.height+'px;background:transparent;z-index:2147483647;pointer-events:auto;';"
+           "['pointerover','pointerenter','pointermove','pointerout','pointerleave','pointerdown','pointerup','pointercancel','mouseover','mouseenter','mousemove','mouseout','mouseleave','mousedown','mouseup','click','contextmenu'].forEach(function(type){"
+             "cover.addEventListener(type,function(event){event.preventDefault();event.stopPropagation();},true);"
+           "});"
+           "root.appendChild(cover);"
+         "});"
+        "})(%@);", rectsJson];
+    [webView evaluateJavaScript:script completionHandler:nil];
+}
+
+- (void)removeBridgeHandlerForChildWebView:(WKWebView *)webView key:(NSString *)key {
+    if (!webView || key.length == 0 || ![self.bridgeEnabledChildWebViewKeys containsObject:key]) return;
+    [webView.configuration.userContentController removeScriptMessageHandlerForName:@"zeroNativeBridge"];
+    [self.bridgeEnabledChildWebViewKeys removeObject:key];
+}
+
+- (void)removeAllChildBridgeHandlers {
+    NSArray<NSString *> *keys = [self.bridgeEnabledChildWebViewKeys.allObjects copy];
+    for (NSString *key in keys) {
+        [self removeBridgeHandlerForChildWebView:self.childWebViews[key] key:key];
+    }
+}
+
+static BOOL ZeroNativeKeyPartyKioskEnabled(void) {
+    NSString *flag = NSProcessInfo.processInfo.environment[@"KEYPARTY_NO_KIOSK"];
+    if (flag.length > 0 && ![flag isEqualToString:@"0"]) return NO;
+    return YES;
+}
+
+static NSRect constrainFrame(NSRect frame) {
+    NSScreen *screen = [NSScreen mainScreen];
+    if (!screen) return frame;
+    NSRect visible = screen.visibleFrame;
+    if (frame.size.width > visible.size.width) frame.size.width = visible.size.width;
+    if (frame.size.height > visible.size.height) frame.size.height = visible.size.height;
+    if (NSMinX(frame) < NSMinX(visible)) frame.origin.x = NSMinX(visible);
+    if (NSMinY(frame) < NSMinY(visible)) frame.origin.y = NSMinY(visible);
+    if (NSMaxX(frame) > NSMaxX(visible)) frame.origin.x = NSMaxX(visible) - frame.size.width;
+    if (NSMaxY(frame) > NSMaxY(visible)) frame.origin.y = NSMaxY(visible) - frame.size.height;
+    return frame;
+}
+
+static NSString *ZeroNativeAppKitBridgeScript(void) {
+    return @"(function(){"
+        "if(window.zero&&window.zero.invoke){return;}"
+        "var pending=new Map();"
+        "var listeners=new Map();"
+        "var nextId=1;"
+        "function post(message){"
+        "if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.zeroNativeBridge){window.webkit.messageHandlers.zeroNativeBridge.postMessage(message);return;}"
+        "if(window.zeroNativeCefBridge&&window.zeroNativeCefBridge.postMessage){window.zeroNativeCefBridge.postMessage(message);return;}"
+        "throw new Error('zero-native bridge transport is unavailable');"
+        "}"
+        "function complete(response){"
+        "var id=response&&response.id!=null?String(response.id):'';"
+        "var entry=pending.get(id);"
+        "if(!entry){return;}"
+        "pending.delete(id);"
+        "if(response.ok){entry.resolve(response.result===undefined?null:response.result);return;}"
+        "var errorInfo=response.error||{};"
+        "var error=new Error(errorInfo.message||'Native command failed');"
+        "error.code=errorInfo.code||'internal_error';"
+        "entry.reject(error);"
+        "}"
+        "function invoke(command,payload){"
+        "if(typeof command!=='string'||command.length===0){return Promise.reject(new TypeError('command must be a non-empty string'));}"
+        "var id=String(nextId++);"
+        "var envelope=JSON.stringify({id:id,command:command,payload:payload===undefined?null:payload});"
+        "return new Promise(function(resolve,reject){"
+        "pending.set(id,{resolve:resolve,reject:reject});"
+        "try{post(envelope);}catch(error){pending.delete(id);reject(error);}"
+        "});"
+        "}"
+        "function selector(value){return typeof value==='number'?{id:value}:{label:String(value)};}"
+        "function ensureString(value,name){if(typeof value!=='string'||value.length===0){throw new TypeError(name+' must be a non-empty string');}return value;}"
+        "function ensureNumber(value,name){if(typeof value!=='number'||!isFinite(value)){throw new TypeError(name+' must be a finite number');}return value;}"
+        "function validateWebViewSelector(options){if(options.label!=null){ensureString(options.label,'label');}if(options.windowId!=null&&(typeof options.windowId!=='number'||!isFinite(options.windowId)||options.windowId<0||Math.floor(options.windowId)!==options.windowId)){throw new TypeError('windowId must be a non-negative integer');}}"
+        "function framePayload(options){options=options||{};validateWebViewSelector(options);var frame=options.frame||options;return {label:options.label,windowId:options.windowId,url:options.url,frame:{x:frame.x==null?0:ensureNumber(frame.x,'frame.x'),y:frame.y==null?0:ensureNumber(frame.y,'frame.y'),width:ensureNumber(frame.width,'frame.width'),height:ensureNumber(frame.height,'frame.height')}};}"
+        "function createPayload(options){options=options||{};ensureString(options.url,'url');var payload=framePayload(options);if(options.layer!=null){payload.layer=ensureNumber(options.layer,'layer');}if(options.transparent!=null){payload.transparent=!!options.transparent;}if(options.bridge!=null){payload.bridge=!!options.bridge;}return payload;}"
+        "function navigatePayload(options){options=options||{};validateWebViewSelector(options);ensureString(options.url,'url');return {label:options.label,windowId:options.windowId,url:options.url};}"
+        "function closePayload(options){options=options||{};validateWebViewSelector(options);return {label:options.label,windowId:options.windowId};}"
+        "function webviewHandle(info){return Object.freeze(Object.assign({},info,{setFrame:function(frame){return webviews.setFrame({label:info.label,windowId:info.windowId,frame:frame});},navigate:function(url){return webviews.navigate({label:info.label,windowId:info.windowId,url:url});},setZoom:function(zoom){return webviews.setZoom({label:info.label,windowId:info.windowId,zoom:zoom});},setLayer:function(layer){return webviews.setLayer({label:info.label,windowId:info.windowId,layer:layer});},close:function(){return webviews.close({label:info.label,windowId:info.windowId});}}));}"
+        "function on(name,callback){if(typeof callback!=='function'){throw new TypeError('callback must be a function');}var set=listeners.get(name);if(!set){set=new Set();listeners.set(name,set);}set.add(callback);return function(){off(name,callback);};}"
+        "function off(name,callback){var set=listeners.get(name);if(set){set.delete(callback);if(set.size===0){listeners.delete(name);}}}"
+        "function emit(name,detail){var set=listeners.get(name);if(set){Array.from(set).forEach(function(callback){callback(detail);});}window.dispatchEvent(new CustomEvent('zero-native:'+name,{detail:detail}));}"
+        "var windows=Object.freeze({"
+        "create:function(options){return invoke('zero-native.window.create',options||{});},"
+        "list:function(){return invoke('zero-native.window.list',{});},"
+        "focus:function(value){return invoke('zero-native.window.focus',selector(value));},"
+        "close:function(value){return invoke('zero-native.window.close',selector(value));}"
+        "});"
+        "var dialogs=Object.freeze({"
+        "openFile:function(options){return invoke('zero-native.dialog.openFile',options||{});},"
+        "saveFile:function(options){return invoke('zero-native.dialog.saveFile',options||{});},"
+        "showMessage:function(options){return invoke('zero-native.dialog.showMessage',options||{});}"
+        "});"
+        "function zoomPayload(options){options=options||{};validateWebViewSelector(options);return {label:options.label,windowId:options.windowId,zoom:ensureNumber(options.zoom,'zoom')};}"
+        "function layerPayload(options){options=options||{};validateWebViewSelector(options);return {label:options.label,windowId:options.windowId,layer:ensureNumber(options.layer,'layer')};}"
+        "var webviews=Object.freeze({"
+        "create:function(options){return invoke('zero-native.webview.create',createPayload(options)).then(webviewHandle);},"
+        "list:function(){return invoke('zero-native.webview.list',{});},"
+        "setFrame:function(options){return invoke('zero-native.webview.setFrame',framePayload(options));},"
+        "navigate:function(options){return invoke('zero-native.webview.navigate',navigatePayload(options));},"
+        "setZoom:function(options){return invoke('zero-native.webview.setZoom',zoomPayload(options));},"
+        "setLayer:function(options){return invoke('zero-native.webview.setLayer',layerPayload(options));},"
+        "close:function(options){return invoke('zero-native.webview.close',closePayload(options));}"
+        "});"
+        "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,webviews:webviews,_complete:complete,_emit:emit}),configurable:false});"
+        "})();";
+}
+
+static NSString *ZeroNativeMimeTypeForPath(NSString *path) {
+    NSString *ext = path.pathExtension.lowercaseString;
+    if ([ext isEqualToString:@"html"] || [ext isEqualToString:@"htm"]) return @"text/html";
+    if ([ext isEqualToString:@"js"] || [ext isEqualToString:@"mjs"]) return @"text/javascript";
+    if ([ext isEqualToString:@"css"]) return @"text/css";
+    if ([ext isEqualToString:@"json"]) return @"application/json";
+    if ([ext isEqualToString:@"svg"]) return @"image/svg+xml";
+    if ([ext isEqualToString:@"png"]) return @"image/png";
+    if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) return @"image/jpeg";
+    if ([ext isEqualToString:@"gif"]) return @"image/gif";
+    if ([ext isEqualToString:@"webp"]) return @"image/webp";
+    if ([ext isEqualToString:@"woff"]) return @"font/woff";
+    if ([ext isEqualToString:@"woff2"]) return @"font/woff2";
+    if ([ext isEqualToString:@"ttf"]) return @"font/ttf";
+    if ([ext isEqualToString:@"otf"]) return @"font/otf";
+    if ([ext isEqualToString:@"wasm"]) return @"application/wasm";
+    return @"application/octet-stream";
+}
+
+static BOOL ZeroNativeDirectoryExists(NSString *path) {
+    BOOL isDirectory = NO;
+    return path.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] && isDirectory;
+}
+
+static NSString *ZeroNativeResolvedAssetRoot(NSString *rootPath) {
+    NSString *resourcePath = [NSBundle mainBundle].resourcePath;
+    BOOL isAppBundle = [[NSBundle mainBundle].bundlePath.pathExtension.lowercaseString isEqualToString:@"app"];
+    if (rootPath.length == 0 || [rootPath isEqualToString:@"."]) {
+        return (isAppBundle && resourcePath.length > 0) ? resourcePath : [[NSFileManager defaultManager] currentDirectoryPath];
+    }
+    if (rootPath.isAbsolutePath) return rootPath;
+    NSString *cwdPath = [[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:rootPath];
+    if (!isAppBundle && ZeroNativeDirectoryExists(cwdPath)) return cwdPath;
+    if (resourcePath.length > 0) {
+        NSString *resourceRoot = [resourcePath stringByAppendingPathComponent:rootPath];
+        if (isAppBundle || ZeroNativeDirectoryExists(resourceRoot)) return resourceRoot;
+    }
+    return cwdPath;
+}
+
+static BOOL ZeroNativePathHasUnsafeSegment(NSString *path) {
+    for (NSString *segment in [path componentsSeparatedByString:@"/"]) {
+        if (segment.length == 0) continue;
+        if ([segment isEqualToString:@"."] || [segment isEqualToString:@".."]) return YES;
+        if ([segment containsString:@"\\"]) return YES;
+    }
+    return NO;
+}
+
+static NSString *ZeroNativeSafeAssetPath(NSURL *url, NSString *entryPath) {
+    if (!url) return nil;
+    NSString *path = url.path.stringByRemovingPercentEncoding ?: url.path;
+    if (path.length == 0 || [path isEqualToString:@"/"]) return entryPath.length > 0 ? entryPath : @"index.html";
+    while ([path hasPrefix:@"/"]) {
+        path = [path substringFromIndex:1];
+    }
+    if (path.length == 0) return entryPath.length > 0 ? entryPath : @"index.html";
+    if (ZeroNativePathHasUnsafeSegment(path)) return nil;
+    return path;
+}
+
+static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
+    NSString *base = origin.length > 0 ? origin : @"zero://app";
+    while ([base hasSuffix:@"/"]) {
+        base = [base substringToIndex:base.length - 1];
+    }
+    NSString *entry = entryPath.length > 0 ? entryPath : @"index.html";
+    while ([entry hasPrefix:@"/"]) {
+        entry = [entry substringFromIndex:1];
+    }
+    return [NSURL URLWithString:[NSString stringWithFormat:@"%@/%@", base, entry]];
+}
+
+- (void)configureApplication {
+    [[NSProcessInfo processInfo] setProcessName:self.appName];
+    [self buildMenuBar];
+    if (self.iconPath.length > 0) {
+        NSImage *icon = [[NSImage alloc] initWithContentsOfFile:self.iconPath];
+        if (icon) {
+            [NSApp setApplicationIconImage:icon];
+        }
+    }
+}
+
+- (void)buildMenuBar {
+    NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
+    [NSApp setMainMenu:mainMenu];
+
+    NSMenuItem *appMenuItem = [[NSMenuItem alloc] initWithTitle:self.appName action:nil keyEquivalent:@""];
+    [mainMenu addItem:appMenuItem];
+    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:self.appName];
+    [appMenuItem setSubmenu:appMenu];
+    [appMenu addItem:[self menuItem:[NSString stringWithFormat:@"About %@", self.appName] action:@selector(orderFrontStandardAboutPanel:) key:@"" modifiers:0]];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItem:[self menuItem:[NSString stringWithFormat:@"Preferences..."] action:@selector(showPreferences:) key:@"," modifiers:NSEventModifierFlagCommand]];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    // KeyParty kiosk: keep the menu items, but strip their key-equivalents so
+    // Cmd+H / Cmd+Opt+H / Cmd+Q / Cmd+W can never hide, quit, or close the game.
+    // (The key-down monitor also swallows these, but this is belt-and-suspenders.)
+    [appMenu addItem:[self menuItem:[NSString stringWithFormat:@"Hide %@", self.appName] action:@selector(hide:) key:@"" modifiers:0]];
+    [appMenu addItem:[self menuItem:@"Hide Others" action:@selector(hideOtherApplications:) key:@"" modifiers:0]];
+    [appMenu addItem:[self menuItem:@"Show All" action:@selector(unhideAllApplications:) key:@"" modifiers:0]];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItem:[self menuItem:[NSString stringWithFormat:@"Quit %@", self.appName] action:@selector(terminate:) key:@"" modifiers:0]];
+
+    NSMenuItem *fileMenuItem = [[NSMenuItem alloc] initWithTitle:@"File" action:nil keyEquivalent:@""];
+    [mainMenu addItem:fileMenuItem];
+    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
+    [fileMenuItem setSubmenu:fileMenu];
+    [fileMenu addItem:[self menuItem:@"Close Window" action:@selector(performClose:) key:@"" modifiers:0]];
+
+    NSMenuItem *editMenuItem = [[NSMenuItem alloc] initWithTitle:@"Edit" action:nil keyEquivalent:@""];
+    [mainMenu addItem:editMenuItem];
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [editMenuItem setSubmenu:editMenu];
+    [editMenu addItem:[self menuItem:@"Undo" action:@selector(undo:) key:@"z" modifiers:NSEventModifierFlagCommand]];
+    [editMenu addItem:[self menuItem:@"Redo" action:@selector(redo:) key:@"Z" modifiers:NSEventModifierFlagCommand]];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItem:[self menuItem:@"Cut" action:@selector(cut:) key:@"x" modifiers:NSEventModifierFlagCommand]];
+    [editMenu addItem:[self menuItem:@"Copy" action:@selector(copy:) key:@"c" modifiers:NSEventModifierFlagCommand]];
+    [editMenu addItem:[self menuItem:@"Paste" action:@selector(paste:) key:@"v" modifiers:NSEventModifierFlagCommand]];
+    [editMenu addItem:[self menuItem:@"Select All" action:@selector(selectAll:) key:@"a" modifiers:NSEventModifierFlagCommand]];
+
+    NSMenuItem *viewMenuItem = [[NSMenuItem alloc] initWithTitle:@"View" action:nil keyEquivalent:@""];
+    [mainMenu addItem:viewMenuItem];
+    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
+    [viewMenuItem setSubmenu:viewMenu];
+    [viewMenu addItem:[self menuItem:@"Reload" action:@selector(reload:) key:@"r" modifiers:NSEventModifierFlagCommand]];
+    [viewMenu addItem:[self menuItem:@"Toggle Web Inspector" action:@selector(toggleWebInspector:) key:@"i" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagOption)]];
+}
+
+- (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key ?: @""];
+    item.keyEquivalentModifierMask = modifiers;
+    if ([self respondsToSelector:action]) {
+        item.target = self;
+    }
+    return item;
+}
+
+- (void)runWithCallback:(zero_native_appkit_event_callback_t)callback context:(void *)context {
+    self.callback = callback;
+    self.context = context;
+
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activate];
+    [self applyKioskPresentation];
+    // Prefer the global event tap (blocks every shortcut system-wide). If it
+    // can't be created (Accessibility not granted yet), fall back to the in-app
+    // key monitor, which still blocks app/menu shortcuts.
+    BOOL tapActive = [self installGlobalEventTap];
+    if (!tapActive && !self.shortcutEventMonitor) {
+        __weak ZeroNativeAppKitHost *weakSelf = self;
+        self.shortcutEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+            ZeroNativeAppKitHost *strongSelf = weakSelf;
+            if (strongSelf && [strongSelf handleShortcutEvent:event]) return nil;
+            return event;
+        }];
+        // Accessibility usually isn't granted on first launch, so the global tap
+        // can't be created yet. Poll for it: the moment the user grants it in
+        // System Settings, upgrade from the (weaker) in-app monitor to the
+        // full system-wide tap without needing a restart.
+        [self startAccessibilityRetry];
+    }
+
+    [self emitEvent:(zero_native_appkit_event_t){ .kind = ZERO_NATIVE_APPKIT_EVENT_START }];
+    [self emitResize];
+    [self emitWindowFrame:YES];
+
+    [self scheduleFrame];
+    [NSApp run];
+}
+
+- (void)stop {
+    [self.timer invalidate];
+    self.timer = nil;
+    if (self.accessibilityRetryTimer) {
+        [self.accessibilityRetryTimer invalidate];
+        self.accessibilityRetryTimer = nil;
+    }
+    if (self.shortcutEventMonitor) {
+        [NSEvent removeMonitor:self.shortcutEventMonitor];
+        self.shortcutEventMonitor = nil;
+    }
+    [self removeGlobalEventTap];
+    [NSApp stop:nil];
+    NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                        location:NSZeroPoint
+                                   modifierFlags:0
+                                       timestamp:0
+                                    windowNumber:0
+                                         context:nil
+                                         subtype:0
+                                           data1:0
+                                           data2:0];
+    [NSApp postEvent:event atStart:NO];
+}
+
+- (void)emitEvent:(zero_native_appkit_event_t)event {
+    if (self.callback) {
+        self.callback(self.context, &event);
+    }
+}
+
+- (void)emitResize {
+    [self emitResizeForWindowId:1];
+}
+
+- (void)emitResizeForWindowId:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)] ?: self.window;
+    NSRect bounds = window.contentView.bounds;
+    [self emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_RESIZE,
+        .window_id = windowId,
+        .width = bounds.size.width,
+        .height = bounds.size.height,
+        .scale = window.backingScaleFactor,
+    }];
+}
+
+- (void)emitDeferredResizeForWindowId:(uint64_t)windowId {
+    __weak ZeroNativeAppKitHost *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ZeroNativeAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.windows[@(windowId)]) return;
+        [strongSelf emitWindowFrameForWindowId:windowId open:YES];
+        [strongSelf emitResizeForWindowId:windowId];
+        [strongSelf scheduleFrame];
+    });
+}
+
+- (void)emitWindowFrame:(BOOL)open {
+    [self emitWindowFrameForWindowId:1 open:open];
+}
+
+- (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open {
+    NSWindow *window = self.windows[@(windowId)] ?: self.window;
+    NSString *label = self.windowLabels[@(windowId)] ?: (windowId == 1 ? self.windowLabel : @"");
+    NSRect frame = window.frame;
+    [self emitEvent:(zero_native_appkit_event_t){
+        .kind = ZERO_NATIVE_APPKIT_EVENT_WINDOW_FRAME,
+        .window_id = windowId,
+        .x = frame.origin.x,
+        .y = frame.origin.y,
+        .width = frame.size.width,
+        .height = frame.size.height,
+        .scale = window.backingScaleFactor,
+        .open = open ? 1 : 0,
+        .focused = window.isKeyWindow ? 1 : 0,
+        .label = label.UTF8String,
+        .label_len = [label lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+    }];
+}
+
+- (void)scheduleFrame {
+    if (self.timer) return;
+    self.timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0)
+                                                 target:self
+                                               selector:@selector(emitFrame)
+                                               userInfo:nil
+                                                repeats:NO];
+}
+
+- (void)scheduleBridgeFrames {
+    self.bridgeFrameKeepalive = 30;
+    [self scheduleFrame];
+}
+
+- (void)emitFrame {
+    self.timer = nil;
+    [self emitEvent:(zero_native_appkit_event_t){ .kind = ZERO_NATIVE_APPKIT_EVENT_FRAME }];
+    if (self.bridgeFrameKeepalive > 0) {
+        self.bridgeFrameKeepalive -= 1;
+        [self scheduleFrame];
+    }
+}
+
+- (void)emitShutdown {
+    if (self.didShutdown) {
+        return;
+    }
+    self.didShutdown = YES;
+    [self emitEvent:(zero_native_appkit_event_t){ .kind = ZERO_NATIVE_APPKIT_EVENT_SHUTDOWN }];
+}
+
+- (void)loadSource:(NSString *)source kind:(NSInteger)kind assetRoot:(NSString *)assetRoot entry:(NSString *)entry origin:(NSString *)origin spaFallback:(BOOL)spaFallback {
+    [self loadSource:source kind:kind assetRoot:assetRoot entry:entry origin:origin spaFallback:spaFallback windowId:1];
+}
+
+- (void)loadSource:(NSString *)source kind:(NSInteger)kind assetRoot:(NSString *)assetRoot entry:(NSString *)entry origin:(NSString *)origin spaFallback:(BOOL)spaFallback windowId:(uint64_t)windowId {
+    WKWebView *webView = [self webViewForWindowId:windowId];
+    ZeroNativeAssetSchemeHandler *assetSchemeHandler = [self assetHandlerForWindowId:windowId];
+    if (kind == 1) {
+        NSURL *url = [NSURL URLWithString:source];
+        if (url) {
+            [webView loadRequest:[NSURLRequest requestWithURL:url]];
+        }
+    } else if (kind == 2) {
+        [assetSchemeHandler configureWithRootPath:assetRoot entryPath:entry spaFallback:spaFallback];
+        NSURL *url = ZeroNativeAssetEntryURL(origin.length > 0 ? origin : @"zero://app", entry.length > 0 ? entry : @"index.html");
+        if (url) {
+            [webView loadRequest:[NSURLRequest requestWithURL:url]];
+        }
+    } else {
+        [webView loadHTMLString:source baseURL:nil];
+    }
+}
+
+- (void)setAllowedNavigationOrigins:(NSArray<NSString *> *)origins externalURLs:(NSArray<NSString *> *)externalURLs externalAction:(NSInteger)externalAction {
+    self.allowedNavigationOrigins = origins.count > 0 ? origins : @[ @"zero://app", @"zero://inline" ];
+    self.allowedExternalURLs = externalURLs ?: @[];
+    self.externalLinkAction = externalAction;
+}
+
+- (BOOL)allowsNavigationURL:(NSURL *)url {
+    if (!url) return YES;
+    NSString *scheme = url.scheme.lowercaseString ?: @"";
+    if (scheme.length == 0 || [scheme isEqualToString:@"about"]) return YES;
+    return ZeroNativePolicyListMatches(self.allowedNavigationOrigins, url);
+}
+
+- (BOOL)openExternalURLIfAllowed:(NSURL *)url {
+    if (self.externalLinkAction != 1) return NO;
+    if (!ZeroNativePolicyListMatches(self.allowedExternalURLs, url)) return NO;
+    [[NSWorkspace sharedWorkspace] openURL:url];
+    return YES;
+}
+
+- (void)emitNavigationForWebView:(WKWebView *)webView url:(NSURL *)url {
+    if (!webView || !url) return;
+    uint64_t windowId = 1;
+    NSString *label = @"main";
+    for (NSNumber *key in self.webViews) {
+        if (self.webViews[key] != webView) continue;
+        windowId = key.unsignedLongLongValue;
+        label = @"main";
+        break;
+    }
+    for (NSString *key in self.childWebViews) {
+        if (self.childWebViews[key] != webView) continue;
+        NSRange separator = [key rangeOfString:@":"];
+        if (separator.location != NSNotFound) {
+            windowId = (uint64_t)[[key substringToIndex:separator.location] longLongValue];
+            label = [key substringFromIndex:separator.location + 1];
+        }
+        break;
+    }
+    if ([label isEqualToString:@"main"]) return;
+    NSDictionary *detail = @{ @"windowId": @(windowId), @"label": label, @"url": url.absoluteString ?: @"" };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:detail options:0 error:nil];
+    if (!data) return;
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    [self emitEventNamed:@"webview:navigate" detailJSON:json ?: @"{}" windowId:windowId];
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    (void)navigation;
+    for (NSNumber *key in self.webViews) {
+        if (self.webViews[key] == webView) {
+            [self updateCoveredMouseRectsInWindow:key.unsignedLongLongValue];
+            return;
+        }
+    }
+    for (NSString *key in self.childWebViews) {
+        if (self.childWebViews[key] != webView) continue;
+        NSRange separator = [key rangeOfString:@":"];
+        if (separator.location != NSNotFound) {
+            uint64_t windowId = (uint64_t)[[key substringToIndex:separator.location] longLongValue];
+            [self updateCoveredMouseRectsInWindow:windowId];
+        }
+        return;
+    }
+}
+
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *url = navigationAction.request.URL;
+    if (!navigationAction.targetFrame || navigationAction.targetFrame.isMainFrame) {
+        if ([self allowsNavigationURL:url]) {
+            [self emitNavigationForWebView:webView url:url];
+            decisionHandler(WKNavigationActionPolicyAllow);
+            return;
+        }
+        if ([self openExternalURLIfAllowed:url]) {
+            decisionHandler(WKNavigationActionPolicyCancel);
+            return;
+        }
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+
+- (NSString *)bridgeOriginForMessage:(WKScriptMessage *)message {
+    WKSecurityOrigin *securityOrigin = message.frameInfo.securityOrigin;
+    if (securityOrigin.protocol.length == 0 || [securityOrigin.protocol isEqualToString:@"about"]) {
+        return @"zero://inline";
+    }
+    if (securityOrigin.host.length == 0) {
+        return [NSString stringWithFormat:@"%@://local", securityOrigin.protocol];
+    }
+    if (securityOrigin.port > 0) {
+        return [NSString stringWithFormat:@"%@://%@:%ld", securityOrigin.protocol, securityOrigin.host, (long)securityOrigin.port];
+    }
+    return [NSString stringWithFormat:@"%@://%@", securityOrigin.protocol, securityOrigin.host];
+}
+
+- (void)receiveBridgeMessage:(WKScriptMessage *)message windowId:(uint64_t)windowId webViewLabel:(NSString *)webViewLabel {
+    if (!self.bridgeCallback) {
+        return;
+    }
+
+    NSString *messageString = nil;
+    if ([message.body isKindOfClass:[NSString class]]) {
+        messageString = (NSString *)message.body;
+    } else if ([NSJSONSerialization isValidJSONObject:message.body]) {
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:message.body options:0 error:nil];
+        if (jsonData) {
+            messageString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+        }
+    }
+    if (!messageString) {
+        messageString = @"{}";
+    }
+
+    NSString *origin = [self bridgeOriginForMessage:message];
+    NSData *messageData = [messageString dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    NSData *originData = [origin dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    NSData *labelData = [(webViewLabel.length > 0 ? webViewLabel : @"main") dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    self.bridgeCallback(self.bridgeContext, windowId, (const char *)labelData.bytes, labelData.length, (const char *)messageData.bytes, messageData.length, (const char *)originData.bytes, originData.length);
+    [self scheduleFrame];
+}
+
+- (void)completeBridgeWithResponse:(NSString *)response {
+    [self completeBridgeWithResponse:response windowId:1 webViewLabel:@"main"];
+}
+
+- (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId {
+    [self completeBridgeWithResponse:response windowId:windowId webViewLabel:@"main"];
+}
+
+- (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId webViewLabel:(NSString *)webViewLabel {
+    WKWebView *webView = [self webViewForWindowId:windowId];
+    NSString *script = [NSString stringWithFormat:@"window.zero&&window.zero._complete(%@);", response.length > 0 ? response : @"{}"];
+    NSString *label = webViewLabel.length > 0 ? webViewLabel : @"main";
+    if ([label isEqualToString:@"main"]) {
+        if (!webView) return;
+        [webView evaluateJavaScript:script completionHandler:nil];
+    } else {
+        WKWebView *child = self.childWebViews[[self webViewKeyForWindow:windowId label:label]];
+        if (!child) return;
+        [child evaluateJavaScript:script completionHandler:nil];
+    }
+    [self scheduleBridgeFrames];
+}
+
+- (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId {
+    WKWebView *webView = [self webViewForWindowId:windowId];
+    NSData *nameData = [NSJSONSerialization dataWithJSONObject:name ?: @"" options:NSJSONWritingFragmentsAllowed error:nil];
+    NSString *nameJSON = nameData ? [[NSString alloc] initWithData:nameData encoding:NSUTF8StringEncoding] : @"\"\"";
+    NSString *detail = detailJSON.length > 0 ? detailJSON : @"null";
+    NSString *script = [NSString stringWithFormat:@"window.zero&&window.zero._emit(%@,%@);", nameJSON, detail];
+    [webView evaluateJavaScript:script completionHandler:nil];
+    [self scheduleBridgeFrames];
+}
+
+- (void)applyKioskPresentation {
+    if (!ZeroNativeKeyPartyKioskEnabled()) return;
+    // macOS "kiosk" lockdown: hide the dock and menu bar, and disable the
+    // OS-level escape hatches a child might stumble onto -- Cmd+Tab / Mission
+    // Control (process switching), Cmd+Opt+Esc (force quit), the power-key
+    // session terminate dialog, and Cmd+H (hide). A window covering the whole
+    // screen then leaves nothing else reachable.
+    NSApplicationPresentationOptions options =
+        NSApplicationPresentationHideDock |
+        NSApplicationPresentationHideMenuBar |
+        NSApplicationPresentationDisableProcessSwitching |
+        NSApplicationPresentationDisableForceQuit |
+        NSApplicationPresentationDisableSessionTermination |
+        NSApplicationPresentationDisableHideApplication;
+    @try {
+        [NSApp setPresentationOptions:options];
+    } @catch (NSException *exception) {
+        // If a given macOS rejects the full set, keep the essential guards.
+        @try {
+            [NSApp setPresentationOptions:(NSApplicationPresentationHideDock |
+                                           NSApplicationPresentationHideMenuBar |
+                                           NSApplicationPresentationDisableProcessSwitching)];
+        } @catch (NSException *ignored) {
+            (void)ignored;
+        }
+    }
+}
+
+- (BOOL)installGlobalEventTap {
+    if (!ZeroNativeKeyPartyKioskEnabled()) return NO;
+    if (self.eventTap) return YES;
+
+    // Ask for Accessibility permission. The tap can only be created once the
+    // app is trusted; the prompt sends the user to System Settings to grant it.
+    NSDictionary *options = @{ (__bridge id)kAXTrustedCheckOptionPrompt: @YES };
+    (void)AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+
+    CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) |
+                       CGEventMaskBit(kCGEventKeyUp) |
+                       CGEventMaskBit(kCGEventFlagsChanged) |
+                       CGEventMaskBit((CGEventType)NSEventTypeSystemDefined);
+
+    CFMachPortRef tap = CGEventTapCreate(kCGHIDEventTapLocation,
+                                         kCGHeadInsertEventTap,
+                                         kCGEventTapOptionDefault,
+                                         mask,
+                                         ZeroNativeEventTapCallback,
+                                         (__bridge void *)self);
+    if (!tap) {
+        return NO; // Not trusted yet — caller falls back to the in-app monitor.
+    }
+
+    CFRunLoopSourceRef source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
+    if (!source) {
+        CFRelease(tap);
+        return NO;
+    }
+    CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+    CGEventTapEnable(tap, true);
+    self.eventTap = tap;
+    self.eventTapSource = source;
+    self.previousFlags = 0;
+    return YES;
+}
+
+- (void)removeGlobalEventTap {
+    if (self.eventTapSource) {
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), self.eventTapSource, kCFRunLoopCommonModes);
+        CFRelease(self.eventTapSource);
+        self.eventTapSource = NULL;
+    }
+    if (self.eventTap) {
+        CGEventTapEnable(self.eventTap, false);
+        CFRelease(self.eventTap);
+        self.eventTap = NULL;
+    }
+}
+
+- (void)startAccessibilityRetry {
+    if (self.accessibilityRetryTimer) return;
+    __weak ZeroNativeAppKitHost *weakSelf = self;
+    self.accessibilityRetryTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
+        ZeroNativeAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf) { [timer invalidate]; return; }
+        if (![strongSelf installGlobalEventTap]) return; // still not trusted; keep polling
+        // The full system-wide tap is live now. Drop the weaker in-app monitor
+        // (the tap already swallows everything) and stop polling.
+        if (strongSelf.shortcutEventMonitor) {
+            [NSEvent removeMonitor:strongSelf.shortcutEventMonitor];
+            strongSelf.shortcutEventMonitor = nil;
+        }
+        [timer invalidate];
+        strongSelf.accessibilityRetryTimer = nil;
+    }];
+}
+
+- (void)forwardKeyToGameWithCode:(NSString *)code key:(NSString *)key repeat:(BOOL)repeat ctrl:(BOOL)ctrl alt:(BOOL)alt meta:(BOOL)meta shift:(BOOL)shift {
+    NSDictionary *detail = @{
+        @"code": code ?: @"Other",
+        @"key": key ?: @"",
+        @"repeat": @(repeat),
+        @"ctrl": @(ctrl),
+        @"alt": @(alt),
+        @"meta": @(meta),
+        @"shift": @(shift),
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:detail options:0 error:nil];
+    NSString *json = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"{}";
+    [self emitEventNamed:@"key" detailJSON:json ?: @"{}" windowId:1];
+}
+
+- (void)forwardKeyUpToGameWithCode:(NSString *)code {
+    // The game tracks which keys are physically held (down → up) so it can drive
+    // its own repeats for *every* held key — the OS only auto-repeats the last
+    // key pressed, so without this, holding several keys at once wouldn't work.
+    NSDictionary *detail = @{ @"code": code ?: @"Other" };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:detail options:0 error:nil];
+    NSString *json = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"{}";
+    [self emitEventNamed:@"keyup" detailJSON:json ?: @"{}" windowId:1];
+}
+
+- (BOOL)handleShortcutEvent:(NSEvent *)event {
+    if (event.type != NSEventTypeKeyDown) return NO;
+    NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    BOOL cmd = (flags & NSEventModifierFlagCommand) != 0;
+    BOOL ctrl = (flags & NSEventModifierFlagControl) != 0;
+    BOOL opt = (flags & NSEventModifierFlagOption) != 0;
+    BOOL shift = (flags & NSEventModifierFlagShift) != 0;
+    NSString *key = event.charactersIgnoringModifiers.lowercaseString ?: @"";
+
+    uint64_t windowId = 1;
+    NSWindow *window = event.window ?: NSApp.keyWindow;
+    for (NSNumber *keyValue in self.windows) {
+        if (self.windows[keyValue] == window) {
+            windowId = keyValue.unsignedLongLongValue;
+            break;
+        }
+    }
+
+    // Secret grown-up quit chord: Control + Option + Shift + Q, detected on the
+    // Q key-down while the three modifiers are held. This is the only way out.
+    if (ctrl && opt && shift && !cmd && [key isEqualToString:@"q"]) {
+        [self emitShutdown];
+        [self stop];
+        return YES;
+    }
+
+    // Swallow every Command/Control/Option combination so it can never trigger a
+    // menu key-equivalent or a system action, and tell the web UI to flash the
+    // "how to quit" hint. Plain keys (the game's input) fall through untouched.
+    if (cmd || ctrl || opt) {
+        [self emitEventNamed:@"hint" detailJSON:@"{\"reason\":\"shortcut\"}" windowId:windowId];
+        return YES;
+    }
+    return NO;
+}
+
+- (void)showPreferences:(id)sender {
+    (void)sender;
+}
+
+- (void)reload:(id)sender {
+    (void)sender;
+    WKWebView *webView = [self mainWebViewForWindow:NSApp.keyWindow];
+    if (!webView) return;
+    [webView reload];
+    [self scheduleFrame];
+}
+
+- (void)toggleWebInspector:(id)sender {
+    (void)sender;
+    WKWebView *webView = [self mainWebViewForWindow:NSApp.keyWindow];
+    if (!webView) return;
+    SEL selector = NSSelectorFromString(@"_showInspector");
+    if ([webView respondsToSelector:selector]) {
+        ((void (*)(id, SEL))[webView methodForSelector:selector])(webView, selector);
+    }
+}
+
+- (void)trayMenuItemClicked:(NSMenuItem *)menuItem {
+    if (self.trayCallback) {
+        self.trayCallback(self.trayContext, (uint32_t)menuItem.tag);
+    }
+}
+
+@end
+
+static NSArray<NSString *> *ZeroNativePolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback) {
+    if (!bytes || len == 0) return fallback ?: @[];
+    NSString *joined = [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding];
+    if (joined.length == 0) return fallback ?: @[];
+    NSMutableArray<NSString *> *values = [[NSMutableArray alloc] init];
+    for (NSString *part in [joined componentsSeparatedByString:@"\n"]) {
+        NSString *trimmed = [part stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (trimmed.length > 0) [values addObject:trimmed];
+    }
+    return values.count > 0 ? values : (fallback ?: @[]);
+}
+
+static NSString *ZeroNativeOriginForURL(NSURL *url) {
+    if (!url) return @"";
+    NSString *scheme = url.scheme.lowercaseString ?: @"";
+    if (scheme.length == 0 || [scheme isEqualToString:@"about"]) return @"zero://inline";
+    if ([scheme isEqualToString:@"file"]) return @"file://local";
+    NSString *host = url.host ?: @"";
+    if (host.length == 0) return [NSString stringWithFormat:@"%@://local", scheme];
+    NSNumber *port = url.port;
+    if (port) return [NSString stringWithFormat:@"%@://%@:%@", scheme, host, port];
+    return [NSString stringWithFormat:@"%@://%@", scheme, host];
+}
+
+static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url) {
+    NSString *origin = ZeroNativeOriginForURL(url);
+    NSString *absolute = url.absoluteString ?: @"";
+    for (NSString *value in values) {
+        if ([value isEqualToString:@"*"]) return YES;
+        if ([value isEqualToString:origin] || [value isEqualToString:absolute]) return YES;
+        if ([value hasSuffix:@"*"]) {
+            NSString *prefix = [value substringToIndex:value.length - 1];
+            if ([absolute hasPrefix:prefix] || [origin hasPrefix:prefix]) return YES;
+        }
+    }
+    return NO;
+}
+
+/* ----------------------- KeyParty global key tap ----------------------- *
+ * Maps physical macOS key codes to web-style codes/labels so the game can
+ * reuse one categorizer, then swallows every key and forwards it to the UI.
+ * ---------------------------------------------------------------------- */
+
+static NSString *ZeroNativeCodeForKey(CGKeyCode kc, NSString *chars) {
+    switch (kc) {
+        case 49: return @"Space";
+        case 36: case 76: return @"Enter";
+        case 48: return @"Tab";
+        case 51: return @"Backspace";
+        case 117: return @"Delete";
+        case 53: return @"Escape";
+        case 123: return @"ArrowLeft";
+        case 124: return @"ArrowRight";
+        case 125: return @"ArrowDown";
+        case 126: return @"ArrowUp";
+        default: break;
+    }
+    if (chars.length == 1) {
+        unichar c = [chars characterAtIndex:0];
+        if (c >= 'a' && c <= 'z') return [NSString stringWithFormat:@"Key%c", (char)(c - 32)];
+        if (c >= 'A' && c <= 'Z') return [NSString stringWithFormat:@"Key%c", (char)c];
+        if (c >= '0' && c <= '9') return [NSString stringWithFormat:@"Digit%c", (char)c];
+    }
+    return @"Other";
+}
+
+static NSString *ZeroNativeKeyLabelForKey(CGKeyCode kc, NSString *chars) {
+    switch (kc) {
+        case 49: return @" ";
+        case 36: case 76: return @"Enter";
+        case 48: return @"Tab";
+        case 51: return @"Backspace";
+        case 117: return @"Delete";
+        case 53: return @"Escape";
+        case 123: return @"ArrowLeft";
+        case 124: return @"ArrowRight";
+        case 125: return @"ArrowDown";
+        case 126: return @"ArrowUp";
+        default: break;
+    }
+    return chars.length > 0 ? chars : @"";
+}
+
+static CGEventFlags ZeroNativeMaskForModifierKey(CGKeyCode kc) {
+    switch (kc) {
+        case 56: case 60: return kCGEventFlagMaskShift;
+        case 59: case 62: return kCGEventFlagMaskControl;
+        case 58: case 61: return kCGEventFlagMaskAlternate;
+        case 55: case 54: return kCGEventFlagMaskCommand;
+        case 57: return kCGEventFlagMaskAlphaShift;  // caps lock
+        case 63: return kCGEventFlagMaskSecondaryFn; // fn
+        default: return 0;
+    }
+}
+
+static NSString *ZeroNativeCodeForModifier(CGKeyCode kc) {
+    switch (kc) {
+        case 56: return @"ShiftLeft";
+        case 60: return @"ShiftRight";
+        case 59: return @"ControlLeft";
+        case 62: return @"ControlRight";
+        case 58: return @"AltLeft";
+        case 61: return @"AltRight";
+        case 55: return @"MetaLeft";
+        case 54: return @"MetaRight";
+        case 57: return @"CapsLock";
+        case 63: return @"Fn";
+        default: return @"Other";
+    }
+}
+
+static NSString *ZeroNativeKeyLabelForModifier(CGKeyCode kc) {
+    switch (kc) {
+        case 56: case 60: return @"Shift";
+        case 59: case 62: return @"Control";
+        case 58: case 61: return @"Alt";
+        case 55: case 54: return @"Meta";
+        case 57: return @"CapsLock";
+        case 63: return @"Fn";
+        default: return @"";
+    }
+}
+
+static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
+    (void)proxy;
+    ZeroNativeAppKitHost *host = (__bridge ZeroNativeAppKitHost *)userInfo;
+    if (!host) return event;
+
+    // The system disables a tap that runs too long or on certain input; re-arm.
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (host.eventTap) CGEventTapEnable(host.eventTap, true);
+        return event;
+    }
+
+    CGEventFlags flags = CGEventGetFlags(event);
+    BOOL cmd = (flags & kCGEventFlagMaskCommand) != 0;
+    BOOL ctrl = (flags & kCGEventFlagMaskControl) != 0;
+    BOOL alt = (flags & kCGEventFlagMaskAlternate) != 0;
+    BOOL shift = (flags & kCGEventFlagMaskShift) != 0;
+
+    if (type == kCGEventKeyDown) {
+        CGKeyCode keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+        BOOL repeat = CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) != 0;
+
+        // Grown-up quit chord: Control + Option + Shift + Q (physical Q == 12).
+        if (ctrl && alt && shift && !cmd && keyCode == 12) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [host emitShutdown];
+                [host stop];
+            });
+            return NULL;
+        }
+
+        NSEvent *ns = nil;
+        @try { ns = [NSEvent eventWithCGEvent:event]; } @catch (NSException *e) { (void)e; ns = nil; }
+        NSString *chars = ns.charactersIgnoringModifiers ?: @"";
+        NSString *code = ZeroNativeCodeForKey(keyCode, chars);
+        NSString *key = ZeroNativeKeyLabelForKey(keyCode, chars);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [host forwardKeyToGameWithCode:code key:key repeat:repeat ctrl:ctrl alt:alt meta:cmd shift:shift];
+        });
+        return NULL; // swallow: no app or system action ever fires
+    }
+
+    if (type == kCGEventKeyUp) {
+        // Still swallowed, but forward the release so the game can stop driving
+        // this key's repeat (it tracks every held key itself).
+        CGKeyCode keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+        NSEvent *ns = nil;
+        @try { ns = [NSEvent eventWithCGEvent:event]; } @catch (NSException *e) { (void)e; ns = nil; }
+        NSString *chars = ns.charactersIgnoringModifiers ?: @"";
+        NSString *code = ZeroNativeCodeForKey(keyCode, chars);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [host forwardKeyUpToGameWithCode:code];
+        });
+        return NULL; // swallow: no app or system action ever fires
+    }
+
+    if (type == kCGEventFlagsChanged) {
+        // A modifier was pressed or released. Make a *press* produce an effect,
+        // but let the event pass so modifier state stays in sync.
+        CGKeyCode keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+        CGEventFlags mask = ZeroNativeMaskForModifierKey(keyCode);
+        BOOL pressed = mask != 0 && (flags & mask) != 0 && (host.previousFlags & mask) == 0;
+        host.previousFlags = flags;
+        if (pressed) {
+            NSString *code = ZeroNativeCodeForModifier(keyCode);
+            NSString *key = ZeroNativeKeyLabelForModifier(keyCode);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [host forwardKeyToGameWithCode:code key:key repeat:NO ctrl:ctrl alt:alt meta:cmd shift:shift];
+            });
+        }
+        return event;
+    }
+
+    if (type == (CGEventType)NSEventTypeSystemDefined) {
+        // Aux buttons (subtype 8): media keys + power/eject. Swallow them so
+        // sleep / display-sleep chords and media keys do nothing in kiosk.
+        NSEvent *ns = nil;
+        @try { ns = [NSEvent eventWithCGEvent:event]; } @catch (NSException *e) { (void)e; ns = nil; }
+        if (ns && ns.subtype == 8) return NULL;
+        return event;
+    }
+
+    return event;
+}
+
+zero_native_appkit_host_t *zero_native_appkit_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+    @autoreleasepool {
+        NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"zero-native";
+        NSString *windowTitleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
+        NSString *bundleIdString = [[NSString alloc] initWithBytes:bundle_id length:bundle_id_len encoding:NSUTF8StringEncoding] ?: @"dev.zero_native.app";
+        NSString *iconPathString = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding] ?: @"";
+        NSString *windowLabelString = [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] ?: @"main";
+        ZeroNativeAppKitHost *host = [[ZeroNativeAppKitHost alloc] initWithAppName:appNameString windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0)];
+        return (__bridge_retained zero_native_appkit_host_t *)host;
+    }
+}
+
+void zero_native_appkit_destroy(zero_native_appkit_host_t *host) {
+    if (!host) {
+        return;
+    }
+    CFBridgingRelease(host);
+}
+
+void zero_native_appkit_run(zero_native_appkit_host_t *host, zero_native_appkit_event_callback_t callback, void *context) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    [object runWithCallback:callback context:context];
+}
+
+void zero_native_appkit_stop(zero_native_appkit_host_t *host) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    [object emitShutdown];
+    [object stop];
+}
+
+void zero_native_appkit_load_webview(zero_native_appkit_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
+    zero_native_appkit_load_window_webview(host, 1, source, source_len, source_kind, asset_root, asset_root_len, asset_entry, asset_entry_len, asset_origin, asset_origin_len, spa_fallback);
+}
+
+void zero_native_appkit_load_window_webview(zero_native_appkit_host_t *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *sourceString = source ? [[NSString alloc] initWithBytes:source length:source_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *assetRoot = asset_root ? [[NSString alloc] initWithBytes:asset_root length:asset_root_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *assetEntry = asset_entry ? [[NSString alloc] initWithBytes:asset_entry length:asset_entry_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *assetOrigin = asset_origin ? [[NSString alloc] initWithBytes:asset_origin length:asset_origin_len encoding:NSUTF8StringEncoding] : @"";
+    [object loadSource:sourceString ?: @""
+                  kind:source_kind
+             assetRoot:assetRoot ?: @""
+                 entry:assetEntry ?: @""
+                origin:assetOrigin ?: @""
+           spaFallback:(spa_fallback != 0)
+              windowId:window_id];
+}
+
+void zero_native_appkit_set_bridge_callback(zero_native_appkit_host_t *host, zero_native_appkit_bridge_callback_t callback, void *context) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    object.bridgeCallback = callback;
+    object.bridgeContext = context;
+}
+
+void zero_native_appkit_bridge_respond(zero_native_appkit_host_t *host, const char *response, size_t response_len) {
+    zero_native_appkit_bridge_respond_window(host, 1, response, response_len);
+}
+
+void zero_native_appkit_bridge_respond_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *response, size_t response_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *responseString = response ? [[NSString alloc] initWithBytes:response length:response_len encoding:NSUTF8StringEncoding] : @"{}";
+    [object completeBridgeWithResponse:responseString ?: @"{}" windowId:window_id];
+}
+
+void zero_native_appkit_bridge_respond_webview(zero_native_appkit_host_t *host, uint64_t window_id, const char *webview_label, size_t webview_label_len, const char *response, size_t response_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = webview_label ? [[NSString alloc] initWithBytes:webview_label length:webview_label_len encoding:NSUTF8StringEncoding] : @"main";
+    NSString *responseString = response ? [[NSString alloc] initWithBytes:response length:response_len encoding:NSUTF8StringEncoding] : @"{}";
+    [object completeBridgeWithResponse:responseString ?: @"{}" windowId:window_id webViewLabel:labelString ?: @"main"];
+}
+
+void zero_native_appkit_emit_window_event(zero_native_appkit_host_t *host, uint64_t window_id, const char *name, size_t name_len, const char *detail_json, size_t detail_json_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *nameString = name ? [[NSString alloc] initWithBytes:name length:name_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *detailString = detail_json ? [[NSString alloc] initWithBytes:detail_json length:detail_json_len encoding:NSUTF8StringEncoding] : @"null";
+    [object emitEventNamed:nameString ?: @"" detailJSON:detailString ?: @"null" windowId:window_id];
+}
+
+void zero_native_appkit_set_security_policy(zero_native_appkit_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSArray<NSString *> *origins = ZeroNativePolicyListFromBytes(allowed_origins, allowed_origins_len, @[ @"zero://app", @"zero://inline" ]);
+    NSArray<NSString *> *externalURLs = ZeroNativePolicyListFromBytes(external_urls, external_urls_len, @[]);
+    [object setAllowedNavigationOrigins:origins externalURLs:externalURLs externalAction:external_action];
+}
+
+int zero_native_appkit_create_window(zero_native_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) makeMain:NO] ? 1 : 0;
+}
+
+int zero_native_appkit_focus_window(zero_native_appkit_host_t *host, uint64_t window_id) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object focusWindowWithId:window_id];
+    return 1;
+}
+
+int zero_native_appkit_close_window(zero_native_appkit_host_t *host, uint64_t window_id) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object closeWindowWithId:window_id];
+    return 1;
+}
+
+int zero_native_appkit_create_webview(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *urlString = url ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding] : @"";
+    return [object createWebViewInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height layer:layer transparent:transparent != 0 bridgeEnabled:bridge_enabled != 0] ? 1 : 0;
+}
+
+int zero_native_appkit_set_webview_frame(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object setWebViewFrameInWindow:window_id label:labelString ?: @"" x:x y:y width:width height:height] ? 1 : 0;
+}
+
+int zero_native_appkit_navigate_webview(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *urlString = url ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding] : @"";
+    return [object navigateWebViewInWindow:window_id label:labelString ?: @"" url:urlString ?: @""] ? 1 : 0;
+}
+
+int zero_native_appkit_set_webview_zoom(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double zoom) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object setWebViewZoomInWindow:window_id label:labelString ?: @"" zoom:zoom] ? 1 : 0;
+}
+
+int zero_native_appkit_set_webview_layer(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int layer) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object setWebViewLayerInWindow:window_id label:labelString ?: @"" layer:layer] ? 1 : 0;
+}
+
+int zero_native_appkit_close_webview(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object closeWebViewInWindow:window_id label:labelString ?: @""] ? 1 : 0;
+}
+
+size_t zero_native_appkit_clipboard_read(zero_native_appkit_host_t *host, char *buffer, size_t buffer_len) {
+    (void)host;
+    NSString *value = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString] ?: @"";
+    NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
+    size_t count = MIN(buffer_len, data.length);
+    memcpy(buffer, data.bytes, count);
+    return count;
+}
+
+void zero_native_appkit_clipboard_write(zero_native_appkit_host_t *host, const char *text, size_t text_len) {
+    (void)host;
+    NSString *value = [[NSString alloc] initWithBytes:text length:text_len encoding:NSUTF8StringEncoding] ?: @"";
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    [pasteboard setString:value forType:NSPasteboardTypeString];
+}
+
+static NSArray<NSString *> *ZeroNativeParseExtensions(const char *extensions, size_t len) {
+    if (!extensions || len == 0) return nil;
+    NSString *str = [[NSString alloc] initWithBytes:extensions length:len encoding:NSUTF8StringEncoding];
+    if (!str || str.length == 0) return nil;
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+    for (NSString *ext in [str componentsSeparatedByString:@";"]) {
+        NSString *trimmed = [ext stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length > 0) [result addObject:trimmed];
+    }
+    return result.count > 0 ? result : nil;
+}
+
+static void ZeroNativeConfigurePanelExtensions(NSSavePanel *panel, NSArray<NSString *> *extensions) {
+    if (!extensions || extensions.count == 0) return;
+    if (@available(macOS 11.0, *)) {
+        NSMutableArray *types = [NSMutableArray array];
+        for (NSString *ext in extensions) {
+            UTType *type = [UTType typeWithFilenameExtension:ext];
+            if (type) [types addObject:type];
+        }
+        if (types.count > 0) panel.allowedContentTypes = types;
+    }
+}
+
+zero_native_appkit_open_dialog_result_t zero_native_appkit_show_open_dialog(zero_native_appkit_host_t *host, const zero_native_appkit_open_dialog_opts_t *opts, char *buffer, size_t buffer_len) {
+    (void)host;
+    zero_native_appkit_open_dialog_result_t result = { .count = 0, .bytes_written = 0 };
+    @autoreleasepool {
+        NSOpenPanel *panel = [NSOpenPanel openPanel];
+        if (opts->title && opts->title_len > 0) {
+            panel.title = [[NSString alloc] initWithBytes:opts->title length:opts->title_len encoding:NSUTF8StringEncoding];
+        }
+        if (opts->default_path && opts->default_path_len > 0) {
+            NSString *path = [[NSString alloc] initWithBytes:opts->default_path length:opts->default_path_len encoding:NSUTF8StringEncoding];
+            panel.directoryURL = [NSURL fileURLWithPath:path];
+        }
+        panel.canChooseFiles = YES;
+        panel.canChooseDirectories = opts->allow_directories != 0;
+        panel.allowsMultipleSelection = opts->allow_multiple != 0;
+        ZeroNativeConfigurePanelExtensions(panel, ZeroNativeParseExtensions(opts->extensions, opts->extensions_len));
+
+        if ([panel runModal] != NSModalResponseOK) return result;
+
+        size_t offset = 0;
+        for (NSURL *url in panel.URLs) {
+            NSString *path = url.path;
+            NSData *data = [path dataUsingEncoding:NSUTF8StringEncoding];
+            if (!data) continue;
+            size_t needed = data.length + (result.count > 0 ? 1 : 0);
+            if (offset + needed > buffer_len) break;
+            if (result.count > 0) { buffer[offset] = '\n'; offset++; }
+            memcpy(buffer + offset, data.bytes, data.length);
+            offset += data.length;
+            result.count++;
+        }
+        result.bytes_written = offset;
+    }
+    return result;
+}
+
+size_t zero_native_appkit_show_save_dialog(zero_native_appkit_host_t *host, const zero_native_appkit_save_dialog_opts_t *opts, char *buffer, size_t buffer_len) {
+    (void)host;
+    @autoreleasepool {
+        NSSavePanel *panel = [NSSavePanel savePanel];
+        if (opts->title && opts->title_len > 0) {
+            panel.title = [[NSString alloc] initWithBytes:opts->title length:opts->title_len encoding:NSUTF8StringEncoding];
+        }
+        if (opts->default_path && opts->default_path_len > 0) {
+            NSString *path = [[NSString alloc] initWithBytes:opts->default_path length:opts->default_path_len encoding:NSUTF8StringEncoding];
+            panel.directoryURL = [NSURL fileURLWithPath:path];
+        }
+        if (opts->default_name && opts->default_name_len > 0) {
+            panel.nameFieldStringValue = [[NSString alloc] initWithBytes:opts->default_name length:opts->default_name_len encoding:NSUTF8StringEncoding];
+        }
+        ZeroNativeConfigurePanelExtensions(panel, ZeroNativeParseExtensions(opts->extensions, opts->extensions_len));
+
+        if ([panel runModal] != NSModalResponseOK) return 0;
+
+        NSString *path = panel.URL.path;
+        NSData *data = [path dataUsingEncoding:NSUTF8StringEncoding];
+        if (!data) return 0;
+        size_t count = MIN(buffer_len, data.length);
+        memcpy(buffer, data.bytes, count);
+        return count;
+    }
+}
+
+int zero_native_appkit_show_message_dialog(zero_native_appkit_host_t *host, const zero_native_appkit_message_dialog_opts_t *opts) {
+    (void)host;
+    @autoreleasepool {
+        NSAlert *alert = [[NSAlert alloc] init];
+        switch (opts->style) {
+            case 1: alert.alertStyle = NSAlertStyleWarning; break;
+            case 2: alert.alertStyle = NSAlertStyleCritical; break;
+            default: alert.alertStyle = NSAlertStyleInformational; break;
+        }
+        NSString *title = opts->title && opts->title_len > 0 ? [[NSString alloc] initWithBytes:opts->title length:opts->title_len encoding:NSUTF8StringEncoding] : nil;
+        NSString *message = opts->message && opts->message_len > 0 ? [[NSString alloc] initWithBytes:opts->message length:opts->message_len encoding:NSUTF8StringEncoding] : nil;
+        NSString *informative = opts->informative_text && opts->informative_text_len > 0 ? [[NSString alloc] initWithBytes:opts->informative_text length:opts->informative_text_len encoding:NSUTF8StringEncoding] : nil;
+        if (message.length > 0) {
+            alert.messageText = message;
+        } else if (title.length > 0) {
+            alert.messageText = title;
+        }
+        if (informative.length > 0) {
+            alert.informativeText = informative;
+        }
+        if (opts->message && opts->message_len > 0) {
+            alert.window.title = title.length > 0 ? title : @"";
+        }
+        if (opts->primary_button && opts->primary_button_len > 0) {
+            [alert addButtonWithTitle:[[NSString alloc] initWithBytes:opts->primary_button length:opts->primary_button_len encoding:NSUTF8StringEncoding]];
+        } else {
+            [alert addButtonWithTitle:@"OK"];
+        }
+        if (opts->secondary_button && opts->secondary_button_len > 0) {
+            [alert addButtonWithTitle:[[NSString alloc] initWithBytes:opts->secondary_button length:opts->secondary_button_len encoding:NSUTF8StringEncoding]];
+        }
+        if (opts->tertiary_button && opts->tertiary_button_len > 0) {
+            [alert addButtonWithTitle:[[NSString alloc] initWithBytes:opts->tertiary_button length:opts->tertiary_button_len encoding:NSUTF8StringEncoding]];
+        }
+
+        NSModalResponse response = [alert runModal];
+        if (response == NSAlertFirstButtonReturn) return 0;
+        if (response == NSAlertSecondButtonReturn) return 1;
+        return 2;
+    }
+}
+
+void zero_native_appkit_create_tray(zero_native_appkit_host_t *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    @autoreleasepool {
+        if (object.statusItem) {
+            [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
+        }
+        object.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
+
+        if (icon_path && icon_path_len > 0) {
+            NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
+            NSImage *image = [[NSImage alloc] initWithContentsOfFile:path];
+            if (image) {
+                image.template = YES;
+                image.size = NSMakeSize(18, 18);
+                object.statusItem.button.image = image;
+            }
+        }
+        if (!object.statusItem.button.image) {
+            object.statusItem.button.title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
+        }
+        if (tooltip && tooltip_len > 0) {
+            object.statusItem.button.toolTip = [[NSString alloc] initWithBytes:tooltip length:tooltip_len encoding:NSUTF8StringEncoding];
+        }
+    }
+}
+
+void zero_native_appkit_update_tray_menu(zero_native_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    @autoreleasepool {
+        if (!object.statusItem) return;
+        NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+        for (size_t i = 0; i < count; i++) {
+            if (separators[i]) {
+                [menu addItem:[NSMenuItem separatorItem]];
+                continue;
+            }
+            NSString *label = labels[i] ? [[NSString alloc] initWithBytes:labels[i] length:label_lens[i] encoding:NSUTF8StringEncoding] : @"";
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label ?: @""
+                                                          action:@selector(trayMenuItemClicked:)
+                                                   keyEquivalent:@""];
+            item.tag = (NSInteger)item_ids[i];
+            item.target = object;
+            item.enabled = enabled_flags[i] != 0;
+            [menu addItem:item];
+        }
+        object.statusItem.menu = menu;
+    }
+}
+
+void zero_native_appkit_remove_tray(zero_native_appkit_host_t *host) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    if (object.statusItem) {
+        [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
+        object.statusItem = nil;
+    }
+}
+
+void zero_native_appkit_set_tray_callback(zero_native_appkit_host_t *host, zero_native_appkit_tray_callback_t callback, void *context) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    object.trayCallback = callback;
+    object.trayContext = context;
+}
