@@ -35,7 +35,9 @@ jobs:
           node-version: 24
 
       - name: Install release tooling
-        run: npm install
+        # Only Changesets is needed here; skip zero-native's postinstall (the
+        # native CLI download) — the binary jobs do a full install for that.
+        run: npm install --ignore-scripts
 
       - name: Create version PR or tag a release
         id: changesets
@@ -62,8 +64,10 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Install the zero-native framework + CLI
-        run: npm install -g zero-native@0.2.0
+      - name: Install dependencies (zero-native framework + CLI)
+        run: |
+          npm install
+          echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Resolve the released version
         id: ver
@@ -76,8 +80,7 @@ jobs:
         run: |
           zig build package \
             -Doptimize=ReleaseFast \
-            -Dpackage-target=macos \
-            -Dzero-native-path="$(npm root -g)/zero-native"
+            -Dpackage-target=macos
 
       - name: Zip the .app bundle
         run: |
@@ -113,8 +116,11 @@ jobs:
       # headers (wrl.h) the WebView2 host needs.
       - uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install the zero-native framework + CLI
-        run: npm install -g zero-native@0.2.0
+      - name: Install dependencies (zero-native framework + CLI)
+        shell: bash
+        run: |
+          npm install
+          echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Fetch the WebView2 SDK headers + loader
         shell: bash
@@ -140,8 +146,7 @@ jobs:
             -Doptimize=ReleaseFast \
             -Dpackage-target=windows \
             -Dwebview2-include="$NUGET_DIR/build/native/include" \
-            -Dwinrt-include="$WINRT" \
-            -Dzero-native-path="$(npm root -g)/zero-native"
+            -Dwinrt-include="$WINRT"
 
       - name: Bundle the WebView2 loader and zip
         shell: bash

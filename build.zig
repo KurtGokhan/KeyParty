@@ -26,7 +26,6 @@ const PackageTarget = enum {
     linux,
 };
 
-const default_zero_native_path ="/Users/gokhankurt/.vite-plus/js_runtime/node/24.16.0/lib/node_modules/zero-native";
 const app_exe_name = "keyparty";
 
 pub fn build(b: *std.Build) void {
@@ -41,7 +40,11 @@ pub fn build(b: *std.Build) void {
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
-    const zero_native_path = b.option([]const u8, "zero-native-path", "Path to the zero-native framework checkout") orelse default_zero_native_path;
+    // zero-native is a normal dependency (see package.json), so the framework
+    // sources live in the project's node_modules. Anchor to the build root so it
+    // resolves no matter what directory `zig build` is invoked from. Override with
+    // -Dzero-native-path=/path/to/zero-native to point at a different checkout.
+    const zero_native_path = b.option([]const u8, "zero-native-path", "Path to the zero-native framework checkout") orelse b.pathFromRoot("node_modules/zero-native");
     // Folder that holds WebView2.h (from the Microsoft.Web.WebView2 NuGet package).
     // Needed to compile the vendored Windows kiosk host; the CI release job sets it.
     const webview2_include = b.option([]const u8, "webview2-include", "Path to the WebView2 SDK headers (folder containing WebView2.h)");

@@ -144,22 +144,34 @@ chord still returns to the menu — handled by the DOM key path in the web UI.
 
 ## Setup
 
-`zig build dev`, `zig build run`, and `zig build package` install frontend
-dependencies automatically. To install them explicitly:
+The zero-native framework is a normal dependency, so install it (and the release
+tooling) from the repo root, then let the build pull in the frontend deps:
 
 ```sh
-npm install --prefix frontend
+npm install   # installs node_modules/zero-native + its CLI, and Changesets
 ```
 
-The build defaults to this zero-native framework path:
+`zig build dev`, `zig build run`, and `zig build package` also install the
+frontend deps automatically (`npm install --prefix frontend`).
 
-```text
-/Users/gokhankurt/.vite-plus/js_runtime/node/24.16.0/lib/node_modules/zero-native
+The build reads the framework from `node_modules/zero-native` (anchored at the
+repo root) by default — override with `-Dzero-native-path=/path/to/zero-native`
+to use a different checkout. The patched native hosts
+([`native/appkit_host.m`](native/appkit_host.m),
+[`native/webview2_host.cpp`](native/webview2_host.cpp)) ship in this repo, so
+only the rest of the framework comes from that path.
+
+`zig build dev` and `zig build package` shell out to the `zero-native` CLI, which
+`npm install` puts in `node_modules/.bin`. Run those via `npx zig build …` (or
+add `node_modules/.bin` to your `PATH`) so the CLI resolves — or install it
+globally with `npm i -g zero-native@0.2.0`.
+
+On **Windows**, also pass the WebView2 + winrt header paths so the kiosk host
+compiles (the release workflow does this automatically):
+
+```sh
+zig build run -Dwebview2-include=/path/to/webview2/include -Dwinrt-include=/path/to/sdk/winrt
 ```
-
-Override it with `-Dzero-native-path=/path/to/zero-native` if you move this app.
-(The patched `native/appkit_host.m` ships in this repo, so only the rest of the
-framework is read from that path.)
 
 ## Commands
 
