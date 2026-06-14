@@ -37,6 +37,10 @@ using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
 #else
 #define ZERO_NATIVE_HAS_WEBVIEW2 0
+// Without these headers the host can only open a bare window with no web content
+// (a blank window). Make that loud at build time: pass -Dwebview2-include and
+// -Dwinrt-include so WebView2.h and wrl.h are found.
+#pragma message("KeyParty WARNING: WebView2.h / wrl.h not found -- building a BLANK-WINDOW stub. Pass -Dwebview2-include and -Dwinrt-include.")
 #endif
 
 namespace {
@@ -477,6 +481,15 @@ static std::wstring jsonQuote(const std::wstring &s) {
     return out;
 }
 
+// Format an HRESULT as 0xXXXXXXXX for diagnostic message boxes.
+static std::wstring hrHex(long hr) {
+    static const wchar_t *hex = L"0123456789abcdef";
+    unsigned long v = (unsigned long)hr;
+    std::wstring s = L"0x";
+    for (int shift = 28; shift >= 0; shift -= 4) s.push_back(hex[(v >> shift) & 0xF]);
+    return s;
+}
+
 static void executeMainScript(Host *host, uint64_t window_id, const std::wstring &js) {
 #if ZERO_NATIVE_HAS_WEBVIEW2
     if (!host) return;
@@ -816,6 +829,11 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
     auto factory = webView2Factory();
     if (!factory) {
         it->second.webview_started = false;
+        MessageBoxW(it->second.hwnd,
+                    L"Could not load WebView2Loader.dll. It must sit next to keyparty.exe "
+                    L"(it is bundled in the release .zip; a bare \"zig build run\" exe will "
+                    L"not have it).",
+                    L"KeyParty", MB_OK | MB_ICONERROR);
         return;
     }
     HWND hwnd = it->second.hwnd;
@@ -827,7 +845,14 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
             if (!token) return S_OK;
             std::lock_guard<std::recursive_mutex> guard(token->mutex);
             if (!token->alive) return S_OK;
-            if (FAILED(result) || !environment) return result;
+            if (FAILED(result) || !environment) {
+                MessageBoxW(hwnd,
+                            (std::wstring(L"WebView2 environment could not be created (") + hrHex(result) +
+                             L").\nIs the WebView2 Runtime installed? It ships with Windows 11 and "
+                             L"current Windows 10; otherwise install the Evergreen runtime.").c_str(),
+                            L"KeyParty", MB_OK | MB_ICONERROR);
+                return result;
+            }
             auto found = host->windows.find(window_id);
             if (found == host->windows.end() || found->second.hwnd != hwnd || !IsWindow(hwnd)) return S_OK;
             return environment->CreateCoreWebView2Controller(hwnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
@@ -842,7 +867,13 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                         if (controller) controller->Close();
                         return S_OK;
                     }
-                    if (FAILED(controller_result) || !controller) return controller_result;
+                    if (FAILED(controller_result) || !controller) {
+                        MessageBoxW(hwnd,
+                                    (std::wstring(L"WebView2 controller could not be created (") +
+                                     hrHex(controller_result) + L").").c_str(),
+                                    L"KeyParty", MB_OK | MB_ICONERROR);
+                        return controller_result;
+                    }
                     auto found = host->windows.find(window_id);
                     if (found == host->windows.end() || found->second.hwnd != hwnd) {
                         controller->Close();
@@ -924,6 +955,31 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 args->put_Cancel(TRUE);
                                 return S_OK;
                             }).Get(), &nav_token);
+
+                        // If the top-level navigation fails, the window goes blank
+                        // with no other clue — surface it (usually means the bundled
+                        // frontend wasn't found at the mapped asset folder).
+                        EventRegistrationToken navc_token = {};
+                        w.main_webview->add_NavigationCompleted(Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                            [lifetime](ICoreWebView2 *, ICoreWebView2NavigationCompletedEventArgs *args) -> HRESULT {
+                                auto token = lifetime.lock();
+                                if (!token) return S_OK;
+                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                                if (!token->alive || !args) return S_OK;
+                                BOOL ok = TRUE;
+                                args->get_IsSuccess(&ok);
+                                if (!ok) {
+                                    COREWEBVIEW2_WEB_ERROR_STATUS status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                                    args->get_WebErrorStatus(&status);
+                                    MessageBoxW(nullptr,
+                                                (std::wstring(L"The page failed to load (web error status ") +
+                                                 std::to_wstring((int)status) +
+                                                 L"). The bundled frontend may be missing from the package, "
+                                                 L"so the asset folder mapping points at nothing.").c_str(),
+                                                L"KeyParty", MB_OK | MB_ICONWARNING);
+                                }
+                                return S_OK;
+                            }).Get(), &navc_token);
                     }
                     applyMainLoad(host, w);
                     return S_OK;
@@ -1145,6 +1201,13 @@ void zero_native_windows_load_window_webview(Host *host, uint64_t window_id, con
     } else {
         ensureMainWebView(host, window_id);
     }
+#else
+    // This binary was compiled without WebView2 support, so there is no web view
+    // to show — say so instead of leaving a silently blank window.
+    MessageBoxW(w.hwnd,
+                L"KeyParty was built without WebView2 support (WebView2.h / wrl.h were "
+                L"not found at compile time), so it can only show a blank window.",
+                L"KeyParty", MB_OK | MB_ICONERROR);
 #endif
     emit(host, w, kWindowFrame);
 }

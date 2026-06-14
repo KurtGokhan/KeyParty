@@ -137,15 +137,22 @@ jobs:
       - name: Build & package the Windows app
         shell: bash
         run: |
+          # Absolute include paths (relative -I can miss in Zig's compile sandbox).
+          WV2_INC="$GITHUB_WORKSPACE/$NUGET_DIR/build/native/include"
           # wrl.h lives in the Windows SDK "winrt" folder, which Zig's msvc target
           # does not add automatically; derive it from the MSVC dev environment.
           WINRT="${WindowsSdkDir}Include/${WindowsSdkVersion}winrt"
-          echo "winrt include: $WINRT"
+          echo "WebView2 include: $WV2_INC"
+          echo "winrt include:    $WINRT"
+          # Fail loudly if the headers are missing — otherwise the host silently
+          # compiles to a blank-window stub (ZERO_NATIVE_HAS_WEBVIEW2 = 0).
+          test -f "$WV2_INC/WebView2.h" || { echo "ERROR: WebView2.h not found at $WV2_INC"; ls -R "$GITHUB_WORKSPACE/$NUGET_DIR" 2>/dev/null | head -40; exit 1; }
+          test -f "$WINRT/wrl.h" || { echo "ERROR: wrl.h not found at $WINRT"; exit 1; }
           zig build package \
             -Dtarget=x86_64-windows-msvc \
             -Doptimize=ReleaseFast \
             -Dpackage-target=windows \
-            -Dwebview2-include="$NUGET_DIR/build/native/include" \
+            -Dwebview2-include="$WV2_INC" \
             -Dwinrt-include="$WINRT"
 
       - name: Bundle the WebView2 loader and zip
