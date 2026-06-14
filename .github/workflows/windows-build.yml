@@ -60,8 +60,13 @@ jobs:
           # Absolute include paths (relative -I can miss in Zig's compile sandbox).
           WV2_INC="$GITHUB_WORKSPACE/$NUGET_DIR/build/native/include"
           # wrl.h lives in the Windows SDK "winrt" folder, which Zig's msvc target
-          # does not add automatically; derive it from the MSVC dev environment.
-          WINRT="${WindowsSdkDir}Include/${WindowsSdkVersion}winrt"
+          # does not add automatically. msvc-dev-cmd exports the SDK version as
+          # $WindowsSDKVersion (note the case — bash names are case-sensitive); if
+          # that path doesn't pan out, fall back to the winrt entry on $INCLUDE.
+          WINRT="${WindowsSdkDir}Include/${WindowsSDKVersion}winrt"
+          if [ ! -f "$WINRT/wrl.h" ]; then
+            WINRT=$(echo "$INCLUDE" | tr ';' '\n' | grep -iE '[\\/]winrt$' | head -n1)
+          fi
           echo "WebView2 include: $WV2_INC"
           echo "winrt include:    $WINRT"
           # Fail loudly if the headers are missing — otherwise the host silently
