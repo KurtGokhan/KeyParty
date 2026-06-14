@@ -1,0 +1,92 @@
+name: Windows build (test)
+
+# On-demand Windows builds for testing — no release required. Trigger it from the
+# Actions tab ("Run workflow"), or it runs automatically on pushes that touch the
+# native shell / frontend. Download the "keyparty-windows" artifact, unzip, and
+# run keyparty.exe (WebView2Loader.dll is bundled alongside it).
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "native/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - "app.zon"
+      - "frontend/**"
+      - ".github/workflows/windows-build.yml"
+
+permissions:
+  contents: read
+
+# One build per ref; newer pushes cancel the older in-flight build.
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # Where the WebView2 SDK headers land (NuGet, version stripped).
+      NUGET_DIR: packages/Microsoft.Web.WebView2
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Sets the MSVC environment (INCLUDE, WindowsSdkDir, WindowsSdkVersion, …)
+      # so Zig's msvc target finds the toolchain and the winrt headers (wrl.h).
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install dependencies (zero-native framework + CLI)
+        shell: bash
+        run: |
+          npm install
+          echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the WebView2 SDK headers + loader
+        shell: bash
+        run: nuget install Microsoft.Web.WebView2 -OutputDirectory packages -ExcludeVersion
+
+      - name: Build & package the Windows app
+        shell: bash
+        run: |
+          # Absolute include paths (relative -I can miss in Zig's compile sandbox).
+          WV2_INC="$GITHUB_WORKSPACE/$NUGET_DIR/build/native/include"
+          # wrl.h lives in the Windows SDK "winrt" folder, which Zig's msvc target
+          # does not add automatically; derive it from the MSVC dev environment.
+          WINRT="${WindowsSdkDir}Include/${WindowsSdkVersion}winrt"
+          echo "WebView2 include: $WV2_INC"
+          echo "winrt include:    $WINRT"
+          # Fail loudly if the headers are missing — otherwise the host silently
+          # compiles to a blank-window stub (ZERO_NATIVE_HAS_WEBVIEW2 = 0).
+          test -f "$WV2_INC/WebView2.h" || { echo "ERROR: WebView2.h not found at $WV2_INC"; ls -R "$GITHUB_WORKSPACE/$NUGET_DIR" 2>/dev/null | head -40; exit 1; }
+          test -f "$WINRT/wrl.h" || { echo "ERROR: wrl.h not found at $WINRT"; exit 1; }
+          zig build package \
+            -Dtarget=x86_64-windows-msvc \
+            -Doptimize=ReleaseFast \
+            -Dpackage-target=windows \
+            -Dwebview2-include="$WV2_INC" \
+            -Dwinrt-include="$WINRT"
+
+      - name: Bundle the WebView2 loader next to the exe
+        shell: bash
+        run: |
+          EXE=$(find zig-out/package -name '*.exe' | head -n1)
+          if [ -z "$EXE" ]; then echo "no .exe produced"; ls -R zig-out/package; exit 1; fi
+          # Loaded dynamically at runtime, so it must sit next to keyparty.exe.
+          cp "$GITHUB_WORKSPACE/$NUGET_DIR/build/native/x64/WebView2Loader.dll" "$(dirname "$EXE")/"
+          echo "PKG_DIR=$(dirname "$EXE")" >> "$GITHUB_ENV"
+
+      - name: Upload the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyparty-windows
+          path: ${{ env.PKG_DIR }}
+          if-no-files-found: error

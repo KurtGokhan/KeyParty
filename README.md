@@ -166,12 +166,30 @@ only the rest of the framework comes from that path.
 add `node_modules/.bin` to your `PATH`) so the CLI resolves — or install it
 globally with `npm i -g zero-native@0.2.0`.
 
-On **Windows**, also pass the WebView2 + winrt header paths so the kiosk host
-compiles (the release workflow does this automatically):
+On **Windows**, building the kiosk host needs MSVC + the Windows SDK, the
+WebView2 SDK headers, and the `winrt` headers (for `wrl.h`). From an *x64 Native
+Tools Command Prompt*:
 
 ```sh
-zig build run -Dwebview2-include=/path/to/webview2/include -Dwinrt-include=/path/to/sdk/winrt
+zig build run -Dtarget=x86_64-windows-msvc ^
+  -Dwebview2-include="C:\path\to\Microsoft.Web.WebView2\build\native\include" ^
+  -Dwinrt-include="%WindowsSdkDir%Include\%WindowsSdkVersion%winrt"
 ```
+
+Without those header paths the host silently compiles to a blank-window stub (it
+says so at launch). `zig build run` also needs `WebView2Loader.dll` (from the
+WebView2 SDK's `build/native/x64/`) findable at runtime — drop it in the repo
+root, which the run's working directory searches. The WebView2 Evergreen runtime
+must be installed too (it is on Windows 11 / current Windows 10).
+
+### Testing a Windows build without a local toolchain
+
+Don't want to install MSVC? Run the **Windows build (test)** workflow
+([`.github/workflows/windows-build.yml`](.github/workflows/windows-build.yml))
+from the repo's **Actions** tab — or just push a change under `native/`,
+`build.zig`, `app.zon`, or `frontend/` and it runs automatically. Download the
+**keyparty-windows** artifact: a ready-to-run build with the frontend and
+`WebView2Loader.dll` already bundled next to `keyparty.exe`. No release needed.
 
 ## Commands
 
