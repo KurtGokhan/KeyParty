@@ -42,6 +42,13 @@ pub fn build(b: *std.Build) void {
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
     const zero_native_path = b.option([]const u8, "zero-native-path", "Path to the zero-native framework checkout") orelse default_zero_native_path;
+    // Folder that holds WebView2.h (from the Microsoft.Web.WebView2 NuGet package).
+    // Needed to compile the vendored Windows kiosk host; the CI release job sets it.
+    const webview2_include = b.option([]const u8, "webview2-include", "Path to the WebView2 SDK headers (folder containing WebView2.h)");
+    // Folder that holds wrl.h — the Windows SDK "winrt" include dir. Zig's msvc
+    // target adds um/shared/ucrt but not winrt, so the WebView2 host needs it
+    // passed in explicitly (the CI job derives it from the MSVC dev environment).
+    const winrt_include = b.option([]const u8, "winrt-include", "Path to the Windows SDK winrt headers (folder containing wrl.h)");
     const optimize_name = @tagName(optimize);
     // Single source of truth for the version (kept in sync by scripts/sync-version.mjs).
     const app_version = stringField(@embedFile("build.zig.zon"), ".version") orelse "0.0.0";
@@ -93,7 +100,7 @@ pub fn build(b: *std.Build) void {
         .name = app_exe_name,
         .root_module = app_mod,
     });
-    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, zero_native_path, cef_dir, cef_auto_install);
+    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, zero_native_path, cef_dir, cef_auto_install, webview2_include, winrt_include);
     b.installArtifact(exe);
 
     const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
@@ -222,7 +229,7 @@ fn externalModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     });
 }
 
-fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, zero_native_path: []const u8, cef_dir: []const u8, cef_auto_install: bool) void {
+fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, zero_native_path: []const u8, cef_dir: []const u8, cef_auto_install: bool, webview2_include: ?[]const u8, winrt_include: ?[]const u8) void {
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
@@ -290,7 +297,18 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
     } else if (platform == .windows) {
         switch (web_engine) {
-            .system => app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17" } }),
+            // KeyParty vendors a patched copy of the WebView2 host (native/webview2_host.cpp)
+            // that adds full-screen kiosk mode, the global key-blocking hook, the quit
+            // chord, and the JS bridge the menu UI needs. It keeps the framework's C ABI,
+            // so the rest of zero-native is unchanged.
+            .system => {
+                const c17 = "-std=c++17";
+                const wv = if (webview2_include) |inc| b.fmt("-I{s}", .{inc}) else null;
+                const wr = if (winrt_include) |inc| b.fmt("-I{s}", .{inc}) else null;
+                const win_flags: []const []const u8 =
+                    if (wv != null and wr != null) &.{ c17, wv.?, wr.? } else if (wv != null) &.{ c17, wv.? } else if (wr != null) &.{ c17, wr.? } else &.{c17};
+                app_mod.addCSourceFile(.{ .file = b.path("native/webview2_host.cpp"), .flags = win_flags });
+            },
             .chromium => {
                 const cef_check = addCefCheck(b, target, cef_dir);
                 if (cef_auto_install) {

@@ -6,6 +6,10 @@ different sound. While playing it runs locked down in kiosk mode so a child can
 mash the whole keyboard without quitting the game, switching apps, or triggering
 anything in the operating system.
 
+It ships as a desktop app for **macOS** and **Windows** (both lock the keyboard
+the same way), plus a browser version that plays the same but can't lock the
+keyboard.
+
 ## Play
 
 ```sh
@@ -13,10 +17,11 @@ zig build run
 ```
 
 The app opens in a small **menu** window with **Start** and **Quit** — and, on
-macOS, the one-time **Accessibility** setup needed for full keyboard locking.
-Press **Start** to enter kiosk mode: the window takes over the **whole** screen,
-menu bar and dock included, and the keyboard is locked. Smash any key, or click
-and drag with the mouse:
+macOS, the one-time **Accessibility** setup needed for full keyboard locking
+(Windows needs no extra permission). Press **Start** to enter kiosk mode: the
+window takes over the **whole** screen — menu bar and dock on macOS, the taskbar
+on Windows — and the keyboard is locked. Smash any key, or click and drag with
+the mouse:
 
 - **Letters** — glowing letter + colored burst, a musical note per letter
 - **Numbers** — bouncing digit + star burst
@@ -44,12 +49,13 @@ media keys — is swallowed before the system ever sees it, *and* still produces
 on-screen effect. When a combo that would normally poke the OS is pressed, the
 game also briefly flashes a small hint showing the chord.
 
-## Accessibility permission (for full key blocking)
+## Accessibility permission (macOS only, for full key blocking)
 
 To swallow **every** system shortcut — including the ones the window server
 handles below any normal app (Spotlight, the screenshot keys, the power/sleep
 chord, media keys) — the game installs a global **CGEventTap**, which macOS only
-allows once the app is trusted for Accessibility.
+allows once the app is trusted for Accessibility. (Windows needs no such
+permission — its low-level keyboard hook works as soon as the app starts.)
 
 The **menu** is where this is handled. If KeyParty isn't trusted yet, the menu
 shows a **Grant Accessibility Access…** button that opens the system prompt and
@@ -60,7 +66,7 @@ without it: the game falls back to an in-app monitor that blocks every app/menu
 shortcut (just not the window-server-level ones) and upgrades to the full tap the
 moment the grant lands.
 
-## How the lockdown works
+## How the lockdown works (macOS)
 
 The kiosk behavior lives in a patched copy of the macOS native host,
 [`native/appkit_host.m`](native/appkit_host.m) (vendored from zero-native and
@@ -96,6 +102,33 @@ the on-screen hint) is in [`frontend/app/page.tsx`](frontend/app/page.tsx). It
 consumes the native `key` events the tap forwards, and also handles plain DOM
 keys (for development / browser use), calling `preventDefault()` so the web layer
 never scrolls, quick-finds, or moves focus.
+
+## How the lockdown works (Windows)
+
+Windows uses a patched copy of zero-native's WebView2 host,
+[`native/webview2_host.cpp`](native/webview2_host.cpp). The upstream host only
+opened a bare window, so this copy also adds the main-window WebView2 (serving the
+bundled frontend), the same `window.zero` / `window.keyparty` bridge as macOS, and
+the kiosk lockdown. The **shared web UI is unchanged** — it sees the same bridge
+events on both platforms.
+
+On **Start** it:
+
+- makes the menu window borderless + topmost and resizes it to cover the whole
+  monitor, the taskbar included;
+- installs a global **low-level keyboard hook** (`WH_KEYBOARD_LL`) that swallows
+  every key — Win, Alt+Tab, Alt+Esc, Alt+F4, Ctrl+Esc, F5/refresh, and the rest —
+  and forwards each one to the web UI as a synthetic `key` event, so it still
+  produces an on-screen effect while never reaching another app or the OS;
+- detects the grown-up **Control + Alt + Shift + Q** chord and returns to the menu.
+
+The one shortcut Windows will not let any app intercept is **Ctrl + Alt + Del**
+(the Secure Attention Sequence) — blocking it needs the OS Assigned Access / kiosk
+policy, which is outside the app.
+
+The packaged app loads the **WebView2** runtime (the Evergreen runtime ships with
+Windows 11 and current Windows 10) via `WebView2Loader.dll`, which is bundled next
+to the executable.
 
 ### Development mode
 
@@ -156,10 +189,17 @@ Versioning and releases run on [Changesets](https://github.com/changesets/change
    updates `CHANGELOG.md`, syncs that version into `app.zon`, `build.zig.zon`,
    and `frontend/package.json` (via [`scripts/sync-version.mjs`](scripts/sync-version.mjs)),
    tags the release (`keyparty@x.y.z`), and creates a GitHub Release.
-3. The same workflow then builds the macOS app (`zig build package`, with the
-   `zero-native` framework installed from npm) and uploads
-   `keyparty-<version>-macos.zip` to that release. The bundle is unsigned, so on
-   first launch users right-click → Open (or clear the quarantine flag).
+3. The same workflow then builds the apps (`zig build package`, with the
+   `zero-native` framework installed from npm) on two runners and uploads both to
+   the release:
+   - **macOS** — `keyparty-<version>-macos.zip` (a `.app` bundle). Unsigned, so on
+     first launch users right-click → Open (or clear the quarantine flag).
+   - **Windows** — `keyparty-<version>-windows.zip` (the `.exe`, the bundled
+     frontend, and `WebView2Loader.dll`). Built against the WebView2 SDK headers
+     (restored from NuGet) with the winrt headers from the MSVC dev environment.
+     Unsigned, so SmartScreen shows a "More info → Run anyway" prompt on first
+     launch; the WebView2 Evergreen runtime must be present (it is on Windows 11
+     and current Windows 10).
 
 One-time repo setup:
 

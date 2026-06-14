@@ -47,7 +47,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # 2. Build the macOS app and attach it to the release Changesets just created.
-  binary:
+  binary-macos:
     needs: release
     if: needs.release.outputs.published == 'true'
     runs-on: macos-latest
@@ -86,5 +86,82 @@ jobs:
 
       - name: Attach the binary to the release
         run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-${{ steps.ver.outputs.version }}-macos.zip" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 3. Build the Windows app (full-screen kiosk WebView2 host) and attach it.
+  binary-windows:
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: windows-latest
+    env:
+      # Where the WebView2 SDK headers land (NuGet, version stripped).
+      NUGET_DIR: packages/Microsoft.Web.WebView2
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Sets the MSVC environment (INCLUDE, WindowsSdkDir, WindowsSdkVersion, …)
+      # so Zig's msvc target finds the toolchain and we can locate the winrt
+      # headers (wrl.h) the WebView2 host needs.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install the zero-native framework + CLI
+        run: npm install -g zero-native@0.2.0
+
+      - name: Fetch the WebView2 SDK headers + loader
+        shell: bash
+        run: nuget install Microsoft.Web.WebView2 -OutputDirectory packages -ExcludeVersion
+
+      - name: Resolve the released version
+        id: ver
+        shell: bash
+        run: |
+          VER=$(echo '${{ needs.release.outputs.publishedPackages }}' | jq -r '.[0].version')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=keyparty@$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Build & package the Windows app
+        shell: bash
+        run: |
+          # wrl.h lives in the Windows SDK "winrt" folder, which Zig's msvc target
+          # does not add automatically; derive it from the MSVC dev environment.
+          WINRT="${WindowsSdkDir}Include/${WindowsSdkVersion}winrt"
+          echo "winrt include: $WINRT"
+          zig build package \
+            -Dtarget=x86_64-windows-msvc \
+            -Doptimize=ReleaseFast \
+            -Dpackage-target=windows \
+            -Dwebview2-include="$NUGET_DIR/build/native/include" \
+            -Dwinrt-include="$WINRT" \
+            -Dzero-native-path="$(npm root -g)/zero-native"
+
+      - name: Bundle the WebView2 loader and zip
+        shell: bash
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          EXE=$(find zig-out/package -name '*.exe' | head -n1)
+          if [ -z "$EXE" ]; then echo "no .exe produced"; ls -R zig-out/package; exit 1; fi
+          # The Evergreen loader is loaded dynamically at runtime, so it must sit
+          # next to the exe in the package.
+          cp "$NUGET_DIR/build/native/x64/WebView2Loader.dll" "$(dirname "$EXE")/"
+          cd zig-out/package
+          DIRS=$(ls -d */ 2>/dev/null || true)
+          if [ -n "$DIRS" ]; then
+            7z a -tzip "../../keyparty-$VER-windows.zip" $DIRS >/dev/null
+          else
+            7z a -tzip "../../keyparty-$VER-windows.zip" ./* >/dev/null
+          fi
+
+      - name: Attach the binary to the release
+        shell: bash
+        run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-${{ steps.ver.outputs.version }}-windows.zip" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
