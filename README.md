@@ -142,3 +142,27 @@ Diagnostics:
 
 - Set `ZERO_NATIVE_LOG_DIR` to override the log directory during development.
 - Set `ZERO_NATIVE_LOG_FORMAT=text|jsonl` to choose the persistent log format.
+
+## Releasing
+
+Versioning and releases run on [Changesets](https://github.com/changesets/changesets).
+
+1. With each change worth shipping, add a changeset and commit it:
+   ```sh
+   npx changeset
+   ```
+2. On push to `main`, the [Release workflow](.github/workflows/release.yml) opens
+   (or updates) a **"Version Packages"** PR. Merging it bumps the version,
+   updates `CHANGELOG.md`, syncs that version into `app.zon`, `build.zig.zon`,
+   and `frontend/package.json` (via [`scripts/sync-version.mjs`](scripts/sync-version.mjs)),
+   tags the release (`keyparty@x.y.z`), and creates a GitHub Release.
+3. The same workflow then builds the macOS app (`zig build package`, with the
+   `zero-native` framework installed from npm) and uploads
+   `keyparty-<version>-macos.zip` to that release. The bundle is unsigned, so on
+   first launch users right-click → Open (or clear the quarantine flag).
+
+One-time repo setup:
+
+- **Settings → Pages → Source: GitHub Actions** (for the web build).
+- **Settings → Actions → General → Workflow permissions:** allow GitHub Actions
+  to **create and approve pull requests** (so the version PR can be opened).

@@ -9,6 +9,10 @@ const nextConfig = {
   output: "export",
   basePath,
   assetPrefix: basePath || undefined,
+  // Pin the workspace root to this folder. The repo has package.json files at
+  // both the root (release tooling) and here, and Next would otherwise warn
+  // about / guess between multiple lockfiles.
+  turbopack: { root: __dirname },
 };
 
 module.exports = nextConfig;

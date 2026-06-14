@@ -43,6 +43,8 @@ pub fn build(b: *std.Build) void {
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
     const zero_native_path = b.option([]const u8, "zero-native-path", "Path to the zero-native framework checkout") orelse default_zero_native_path;
     const optimize_name = @tagName(optimize);
+    // Single source of truth for the version (kept in sync by scripts/sync-version.mjs).
+    const app_version = stringField(@embedFile("build.zig.zon"), ".version") orelse "0.0.0";
     const selected_platform: PlatformOption = switch (platform_option) {
         .auto => if (target.result.os.tag == .macos) .macos else if (target.result.os.tag == .linux) .linux else if (target.result.os.tag == .windows) .windows else .@"null",
         else => platform_option,
@@ -127,7 +129,7 @@ pub fn build(b: *std.Build) void {
         "--optimize",
         optimize_name,
         "--output",
-        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), optimize_name, packageSuffix(package_target) }),
+        b.fmt("zig-out/package/{s}-{s}-{s}-{s}{s}", .{ app_exe_name, app_version, @tagName(package_target), optimize_name, packageSuffix(package_target) }),
         "--binary",
     });
     package.addFileArg(exe.getEmittedBin());

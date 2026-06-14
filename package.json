@@ -1,0 +1,14 @@
+{
+  "name": "keyparty",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Release tooling (Changesets) for the KeyParty app. The app itself lives in src/ (Zig) and frontend/ (Next.js).",
+  "scripts": {
+    "changeset": "changeset",
+    "version": "changeset version && node scripts/sync-version.mjs",
+    "release": "changeset tag"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.1"
+  }
+}

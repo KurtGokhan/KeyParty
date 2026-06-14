@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+  workflow_dispatch:
+
+# Changesets needs to push the version commit/tag and open the version PR;
+# the binary job needs to upload an asset to the release.
+permissions:
+  contents: write
+  pull-requests: write
+
+# Don't run two releases at once, but let an in-progress one finish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # 1. Changesets: open/update the "Version Packages" PR, or — once that PR is
+  #    merged — tag the new version and create the GitHub Release.
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
+      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install release tooling
+        run: npm install
+
+      - name: Create version PR or tag a release
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: npm run version
+          publish: npm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. Build the macOS app and attach it to the release Changesets just created.
+  binary:
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install the zero-native framework + CLI
+        run: npm install -g zero-native@0.2.0
+
+      - name: Resolve the released version
+        id: ver
+        run: |
+          VER=$(echo '${{ needs.release.outputs.publishedPackages }}' | jq -r '.[0].version')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=keyparty@$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Build & package the macOS app
+        run: |
+          zig build package \
+            -Doptimize=ReleaseFast \
+            -Dpackage-target=macos \
+            -Dzero-native-path="$(npm root -g)/zero-native"
+
+      - name: Zip the .app bundle
+        run: |
+          APP="$(ls -d zig-out/package/*.app | head -n1)"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "keyparty-${{ steps.ver.outputs.version }}-macos.zip"
+
+      - name: Attach the binary to the release
+        run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-${{ steps.ver.outputs.version }}-macos.zip" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
