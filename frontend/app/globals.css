@@ -139,3 +139,157 @@ canvas {
   opacity: 1;
   transform: translate(-50%, 0);
 }
+
+/* While the menu is up, keep the play-only overlays from bleeding through its
+   translucent backdrop. */
+.stage-menu .start {
+  opacity: 0;
+}
+
+/* ----------------------------- the menu ----------------------------- */
+/* Shown on launch and whenever the grown-up chord returns from the game.
+   It's a normal, fully-interactive screen (mouse + keyboard) — the kiosk
+   keyboard lockdown is only active while playing. */
+.menu {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(circle at 50% 28%, rgba(54, 22, 104, 0.6), rgba(9, 4, 24, 0.94));
+  backdrop-filter: blur(3px);
+  /* The menu owns its own (normal) cursor — the star wand is for the game. */
+  cursor: default;
+}
+
+.menu-card {
+  width: min(580px, 100%);
+  text-align: center;
+  background: rgba(18, 8, 40, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 28px;
+  padding: clamp(24px, 5vw, 46px);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55), 0 0 70px rgba(120, 60, 255, 0.22);
+}
+
+.menu-title {
+  font-size: clamp(2.6rem, 9vw, 4.2rem);
+  font-weight: 900;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  background: linear-gradient(90deg, #ff5fa2, #ffd23f, #5ff0c0, #5fb8ff, #c08bff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.menu-sub {
+  margin-top: 0.6em;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: clamp(0.95rem, 2.4vw, 1.2rem);
+}
+
+.menu-actions {
+  margin-top: clamp(22px, 4vw, 34px);
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.btn {
+  font-family: inherit;
+  font-weight: 800;
+  font-size: clamp(1.1rem, 2.6vw, 1.5rem);
+  padding: 0.7em 1.7em;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  color: #fff;
+  transition: transform 0.12s ease, filter 0.12s ease, box-shadow 0.12s ease;
+}
+
+.btn:hover {
+  transform: translateY(-2px) scale(1.03);
+  filter: brightness(1.07);
+}
+
+.btn:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.btn:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
+.btn-start {
+  background: linear-gradient(135deg, #ff5fa2, #ff9f43);
+  box-shadow: 0 10px 30px rgba(255, 95, 162, 0.45);
+}
+
+.btn-quit {
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.btn-grant {
+  margin-top: 12px;
+  background: linear-gradient(135deg, #5fb8ff, #5ff0c0);
+  color: #06121f;
+  box-shadow: 0 10px 30px rgba(95, 184, 255, 0.4);
+  font-size: clamp(0.95rem, 2.2vw, 1.15rem);
+}
+
+.access {
+  margin-top: clamp(18px, 3.5vw, 26px);
+  padding: 16px 18px;
+  border-radius: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: clamp(0.85rem, 2vw, 1.02rem);
+  line-height: 1.45;
+}
+
+.access.warn {
+  background: rgba(255, 180, 40, 0.12);
+  border: 1px solid rgba(255, 180, 40, 0.35);
+  color: #ffe2ab;
+}
+
+.access.ok {
+  background: rgba(95, 240, 192, 0.1);
+  border: 1px solid rgba(95, 240, 192, 0.3);
+  color: #bafce6;
+}
+
+.access-hint {
+  font-weight: 600;
+  opacity: 0.82;
+  font-size: 0.85em;
+}
+
+.menu-foot {
+  margin-top: clamp(18px, 3.5vw, 26px);
+  color: rgba(255, 255, 255, 0.55);
+  font-weight: 700;
+  font-size: clamp(0.78rem, 1.7vw, 0.95rem);
+}
+
+.menu kbd,
+.access kbd {
+  display: inline-block;
+  padding: 0.05em 0.5em;
+  margin: 0 0.1em;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  font-family: inherit;
+  font-weight: 800;
+}

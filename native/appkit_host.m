@@ -43,11 +43,18 @@ extern int32_t CGShieldingWindowLevel(void);
 enum { kCGHIDEventTapLocation = 0 };
 
 @class ZeroNativeAppKitHost;
+@class ZeroNativeKeyPartyControlHandler;
 
 static const NSUInteger ZeroNativeMaxChildWebViews = 16;
-// KeyParty: full-screen kiosk lockdown is on by default. Set KEYPARTY_NO_KIOSK=1
-// to run the game in a normal resizable window (useful for development).
+// KeyParty: the app opens in a small centred "menu" window (Start / Quit /
+// accessibility setup). Kiosk lockdown is on by default. Set KEYPARTY_NO_KIOSK=1
+// to keep the game in a normal window when Start is pressed (useful for dev).
+static const CGFloat ZeroNativeKeyPartyMenuWidth = 760;
+static const CGFloat ZeroNativeKeyPartyMenuHeight = 560;
 static BOOL ZeroNativeKeyPartyKioskEnabled(void);
+// KeyParty: JS-side shim (window.keyparty.start/quit/…) injected at document
+// start so the menu can drive kiosk entry/exit. Defined below.
+static NSString *ZeroNativeKeyPartyControlScript(void);
 // KeyParty: global keyboard tap that swallows every shortcut system-wide and
 // forwards each key to the game. Defined near the bottom of this file.
 static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo);
@@ -105,6 +112,11 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)configureWithRootPath:(NSString *)rootPath entryPath:(NSString *)entryPath spaFallback:(BOOL)spaFallback;
 @end
 
+// KeyParty: receives control messages from the menu UI (window.keyparty.*).
+@interface ZeroNativeKeyPartyControlHandler : NSObject <WKScriptMessageHandler>
+@property(nonatomic, assign) ZeroNativeAppKitHost *host;
+@end
+
 @interface ZeroNativeAppKitHost : NSObject <WKNavigationDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
@@ -138,6 +150,11 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, assign) zero_native_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
+// KeyParty kiosk state: the main window flips between a small "menu" window and
+// a borderless, shield-level, full-screen, keyboard-locked "kiosk" window.
+@property(nonatomic, strong) ZeroNativeKeyPartyControlHandler *keyPartyControlHandler;
+@property(nonatomic, assign) BOOL kioskActive;
+@property(nonatomic, assign) NSRect windowedFrame;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
@@ -187,6 +204,10 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId webViewLabel:(NSString *)webViewLabel;
 - (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId;
 - (BOOL)handleShortcutEvent:(NSEvent *)event;
+- (void)enterKiosk;
+- (void)exitKioskToMenu;
+- (void)handleKeyPartyControlCommand:(NSString *)command;
+- (void)emitAccessibilityStatus;
 - (void)applyKioskPresentation;
 - (BOOL)installGlobalEventTap;
 - (void)removeGlobalEventTap;
@@ -275,6 +296,24 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
     (void)userContentController;
     [self.host receiveBridgeMessage:message windowId:self.windowId webViewLabel:self.webViewLabel ?: @"main"];
+}
+
+@end
+
+@implementation ZeroNativeKeyPartyControlHandler
+
+- (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
+    (void)userContentController;
+    NSString *command = nil;
+    if ([message.body isKindOfClass:[NSString class]]) {
+        command = (NSString *)message.body;
+    } else if ([message.body isKindOfClass:[NSDictionary class]]) {
+        id value = ((NSDictionary *)message.body)[@"command"];
+        if ([value isKindOfClass:[NSString class]]) command = value;
+    }
+    if (command.length > 0) {
+        [self.host handleKeyPartyControlCommand:command];
+    }
 }
 
 @end
@@ -375,28 +414,31 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
         return NO;
     }
 
-    NSScreen *screen = [NSScreen mainScreen];
     NSRect rect = restoreFrame ? NSMakeRect(x, y, width, height) : NSMakeRect(0, 0, width, height);
     if (restoreFrame) {
         rect = constrainFrame(rect);
     }
 
-    // KeyParty kiosk: the main window fills the whole screen with no visible
-    // chrome, so a kid cannot drag, resize, minimise, or close it. Child
-    // windows (if any) keep the framework's normal styling.
+    // KeyParty always opens in a small windowed "menu" (Start / Quit /
+    // accessibility setup). Kiosk lockdown happens later, at runtime, when the
+    // grown-up presses Start (-enterKiosk) and is undone by the quit chord
+    // (-exitKioskToMenu). The menu always uses a fixed, centred size — we never
+    // restore a saved (possibly full-screen, from a prior kiosk run) frame for
+    // it — so the app reliably starts as a small window.
+    BOOL isMainWindow = makeMain && windowId == 1;
+    if (isMainWindow) {
+        rect = NSMakeRect(0, 0, ZeroNativeKeyPartyMenuWidth, ZeroNativeKeyPartyMenuHeight);
+    }
+
     NSWindowStyleMask styleMask = (NSWindowStyleMaskTitled |
                                    NSWindowStyleMaskClosable |
                                    NSWindowStyleMaskResizable |
                                    NSWindowStyleMaskMiniaturizable);
-    BOOL kiosk = makeMain && screen != nil && ZeroNativeKeyPartyKioskEnabled();
-    if (kiosk) {
-        rect = screen.frame;
-        // Borderless so AppKit doesn't constrain the frame to keep a title bar
-        // below the menu bar; the window then covers the whole screen.
-        styleMask = NSWindowStyleMaskBorderless;
-    }
 
-    NSWindow *window = kiosk
+    // The main window is always a ZeroNativeKioskWindow so it can later become a
+    // borderless full-screen window without AppKit shoving its frame below the
+    // menu bar (see -constrainFrameRect:). Child windows keep normal styling.
+    NSWindow *window = isMainWindow
         ? [[ZeroNativeKioskWindow alloc] initWithContentRect:rect
                                                    styleMask:styleMask
                                                      backing:NSBackingStoreBuffered
@@ -406,20 +448,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
                                         backing:NSBackingStoreBuffered
                                           defer:NO];
     [window setTitle:(title.length > 0 ? title : self.appName)];
-    if (kiosk) {
-        window.titleVisibility = NSWindowTitleHidden;
-        window.titlebarAppearsTransparent = YES;
-        window.movable = NO;
-        window.movableByWindowBackground = NO;
-        [window standardWindowButton:NSWindowCloseButton].hidden = YES;
-        [window standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
-        [window standardWindowButton:NSWindowZoomButton].hidden = YES;
-        // Shielding level sits above the menu bar and dock, so the game truly
-        // covers the entire screen (the same level screen savers use).
-        window.level = CGShieldingWindowLevel();
-        window.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone | NSWindowCollectionBehaviorStationary;
-        [window setFrame:rect display:YES];
-    } else if (!restoreFrame) {
+    if (isMainWindow || !restoreFrame) {
         [window center];
     }
 
@@ -436,6 +465,17 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
                                                         injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                                      forMainFrameOnly:YES];
     [userContentController addUserScript:bridgeScript];
+    if (isMainWindow) {
+        // KeyParty: expose window.keyparty.{start,quit,requestAccessibility,
+        // checkAccessibility} to the menu UI and route its messages here.
+        ZeroNativeKeyPartyControlHandler *controlHandler = [[ZeroNativeKeyPartyControlHandler alloc] init];
+        controlHandler.host = self;
+        [userContentController addScriptMessageHandler:controlHandler name:@"keypartyControl"];
+        [userContentController addUserScript:[[WKUserScript alloc] initWithSource:ZeroNativeKeyPartyControlScript()
+                                                                   injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                                forMainFrameOnly:YES]];
+        self.keyPartyControlHandler = controlHandler;
+    }
     configuration.userContentController = userContentController;
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
         [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
@@ -489,6 +529,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     [self removeAllChildBridgeHandlers];
     for (WKWebView *webView in self.webViews.allValues) {
         [webView.configuration.userContentController removeScriptMessageHandlerForName:@"zeroNativeBridge"];
+        [webView.configuration.userContentController removeScriptMessageHandlerForName:@"keypartyControl"];
     }
 }
 
@@ -905,6 +946,28 @@ static NSString *ZeroNativeAppKitBridgeScript(void) {
         "})();";
 }
 
+// KeyParty: tiny one-way bridge the menu UI uses to drive kiosk entry/exit and
+// the Accessibility-permission flow. Status comes back via the zero event bus
+// (window.zero.on('keyparty:accessibility', …)).
+static NSString *ZeroNativeKeyPartyControlScript(void) {
+    return @"(function(){"
+        "if(window.keyparty){return;}"
+        "function post(cmd){"
+        "try{"
+        "if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.keypartyControl){"
+        "window.webkit.messageHandlers.keypartyControl.postMessage(cmd);"
+        "}"
+        "}catch(e){}"
+        "}"
+        "Object.defineProperty(window,'keyparty',{value:Object.freeze({"
+        "start:function(){post('start');},"
+        "quit:function(){post('quit');},"
+        "requestAccessibility:function(){post('requestAccessibility');},"
+        "checkAccessibility:function(){post('checkAccessibility');}"
+        "}),configurable:false});"
+        "})();";
+}
+
 static NSString *ZeroNativeMimeTypeForPath(NSString *path) {
     NSString *ext = path.pathExtension.lowercaseString;
     if ([ext isEqualToString:@"html"] || [ext isEqualToString:@"htm"]) return @"text/html";
@@ -1049,26 +1112,11 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     self.callback = callback;
     self.context = context;
 
+    // The app opens at the windowed menu — no screen takeover and no keyboard
+    // lockdown yet. Kiosk mode is armed only when the grown-up presses Start
+    // (see -enterKiosk / -handleKeyPartyControlCommand:).
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activate];
-    [self applyKioskPresentation];
-    // Prefer the global event tap (blocks every shortcut system-wide). If it
-    // can't be created (Accessibility not granted yet), fall back to the in-app
-    // key monitor, which still blocks app/menu shortcuts.
-    BOOL tapActive = [self installGlobalEventTap];
-    if (!tapActive && !self.shortcutEventMonitor) {
-        __weak ZeroNativeAppKitHost *weakSelf = self;
-        self.shortcutEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
-            ZeroNativeAppKitHost *strongSelf = weakSelf;
-            if (strongSelf && [strongSelf handleShortcutEvent:event]) return nil;
-            return event;
-        }];
-        // Accessibility usually isn't granted on first launch, so the global tap
-        // can't be created yet. Poll for it: the moment the user grants it in
-        // System Settings, upgrade from the (weaker) in-app monitor to the
-        // full system-wide tap without needing a restart.
-        [self startAccessibilityRetry];
-    }
 
     [self emitEvent:(zero_native_appkit_event_t){ .kind = ZERO_NATIVE_APPKIT_EVENT_START }];
     [self emitResize];
@@ -1370,8 +1418,143 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     [self scheduleBridgeFrames];
 }
 
+- (void)handleKeyPartyControlCommand:(NSString *)command {
+    if ([command isEqualToString:@"start"]) {
+        [self enterKiosk];
+    } else if ([command isEqualToString:@"quit"]) {
+        [self emitShutdown];
+        [self stop];
+    } else if ([command isEqualToString:@"requestAccessibility"]) {
+        if (ZeroNativeKeyPartyKioskEnabled()) {
+            // Show the system prompt and jump the grown-up straight to the right
+            // pane so they can flip KeyParty on.
+            NSDictionary *options = @{ (__bridge id)kAXTrustedCheckOptionPrompt: @YES };
+            (void)AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+            NSURL *url = [NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"];
+            if (url) [[NSWorkspace sharedWorkspace] openURL:url];
+        }
+        [self emitAccessibilityStatus];
+    } else if ([command isEqualToString:@"checkAccessibility"]) {
+        [self emitAccessibilityStatus];
+    }
+}
+
+- (void)emitAccessibilityStatus {
+    // Check trust WITHOUT prompting (prompt:@NO) so polling from the menu never
+    // pops a dialog; the explicit "Grant" button is what prompts.
+    NSDictionary *trustOptions = @{ (__bridge id)kAXTrustedCheckOptionPrompt: @NO };
+    BOOL trusted = AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)trustOptions) ? YES : NO;
+    BOOL kioskEnabled = ZeroNativeKeyPartyKioskEnabled();
+    NSString *json = [NSString stringWithFormat:@"{\"trusted\":%@,\"kioskEnabled\":%@}",
+                      trusted ? @"true" : @"false",
+                      kioskEnabled ? @"true" : @"false"];
+    [self emitEventNamed:@"keyparty:accessibility" detailJSON:json windowId:1];
+}
+
+// Start: turn the small menu window into the locked-down, full-screen kiosk.
+- (void)enterKiosk {
+    if (self.kioskActive) return;
+    NSWindow *window = self.window;
+    if (!window) return;
+    self.windowedFrame = window.frame; // remembered so the chord can restore it
+
+    if (!ZeroNativeKeyPartyKioskEnabled()) {
+        // Dev / no-kiosk: don't take over the screen or grab the keyboard. The
+        // web UI plays from DOM key events and handles the quit chord itself.
+        return;
+    }
+
+    NSScreen *screen = window.screen ?: [NSScreen mainScreen];
+    NSRect rect = screen ? screen.frame : window.frame;
+    self.kioskActive = YES; // gate -applyKioskPresentation before calling it
+
+    // Borderless + shield level so the window covers the ENTIRE screen, menu bar
+    // and dock included (the level screen savers use). ZeroNativeKioskWindow's
+    // -constrainFrameRect: keeps the frame from being pushed below the menu bar.
+    window.styleMask = NSWindowStyleMaskBorderless;
+    window.titleVisibility = NSWindowTitleHidden;
+    window.titlebarAppearsTransparent = YES;
+    window.movable = NO;
+    window.movableByWindowBackground = NO;
+    window.level = CGShieldingWindowLevel();
+    window.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone | NSWindowCollectionBehaviorStationary;
+    [window setFrame:rect display:YES];
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activate];
+    [self applyKioskPresentation];
+
+    // Prefer the global event tap (blocks every shortcut system-wide). If it
+    // can't be created (Accessibility not granted yet), fall back to the in-app
+    // key monitor and poll until the grown-up grants it.
+    BOOL tapActive = [self installGlobalEventTap];
+    if (!tapActive && !self.shortcutEventMonitor) {
+        __weak ZeroNativeAppKitHost *weakSelf = self;
+        self.shortcutEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+            ZeroNativeAppKitHost *strongSelf = weakSelf;
+            if (strongSelf && [strongSelf handleShortcutEvent:event]) return nil;
+            return event;
+        }];
+        [self startAccessibilityRetry];
+    }
+
+    [self emitResizeForWindowId:1];
+    [self emitWindowFrameForWindowId:1 open:YES];
+    [self scheduleFrame];
+}
+
+// The grown-up quit chord: leave the kiosk and return to the menu instead of
+// quitting outright. Restores the normal window, dock, menu bar, and keyboard.
+- (void)exitKioskToMenu {
+    if (!self.kioskActive) return;
+    self.kioskActive = NO;
+
+    // Release the keyboard lockdown so the menu is fully operable again.
+    [self removeGlobalEventTap];
+    if (self.shortcutEventMonitor) {
+        [NSEvent removeMonitor:self.shortcutEventMonitor];
+        self.shortcutEventMonitor = nil;
+    }
+    if (self.accessibilityRetryTimer) {
+        [self.accessibilityRetryTimer invalidate];
+        self.accessibilityRetryTimer = nil;
+    }
+
+    NSWindow *window = self.window;
+    if (window) {
+        @try {
+            [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+        } @catch (NSException *ignored) {
+            (void)ignored;
+        }
+        window.level = NSNormalWindowLevel;
+        window.collectionBehavior = NSWindowCollectionBehaviorDefault;
+        window.styleMask = (NSWindowStyleMaskTitled |
+                            NSWindowStyleMaskClosable |
+                            NSWindowStyleMaskResizable |
+                            NSWindowStyleMaskMiniaturizable);
+        window.titleVisibility = NSWindowTitleVisible;
+        window.titlebarAppearsTransparent = NO;
+        window.movable = YES;
+        window.movableByWindowBackground = NO;
+        [window setTitle:self.appName];
+        NSRect frame = self.windowedFrame;
+        if (frame.size.width < 200 || frame.size.height < 150) {
+            frame = NSMakeRect(0, 0, ZeroNativeKeyPartyMenuWidth, ZeroNativeKeyPartyMenuHeight);
+        }
+        [window setFrame:frame display:YES];
+        [window center];
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activate];
+    }
+
+    [self emitEventNamed:@"keyparty:menu" detailJSON:@"{}" windowId:1];
+    [self emitResizeForWindowId:1];
+    [self emitWindowFrameForWindowId:1 open:YES];
+    [self scheduleFrame];
+}
+
 - (void)applyKioskPresentation {
-    if (!ZeroNativeKeyPartyKioskEnabled()) return;
+    if (!self.kioskActive || !ZeroNativeKeyPartyKioskEnabled()) return;
     // macOS "kiosk" lockdown: hide the dock and menu bar, and disable the
     // OS-level escape hatches a child might stumble onto -- Cmd+Tab / Mission
     // Control (process switching), Cmd+Opt+Esc (force quit), the power-key
@@ -1509,11 +1692,10 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         }
     }
 
-    // Secret grown-up quit chord: Control + Option + Shift + Q, detected on the
-    // Q key-down while the three modifiers are held. This is the only way out.
+    // Grown-up chord: Control + Option + Shift + Q, detected on the Q key-down
+    // while the three modifiers are held. Leaves the kiosk back to the menu.
     if (ctrl && opt && shift && !cmd && [key isEqualToString:@"q"]) {
-        [self emitShutdown];
-        [self stop];
+        [self exitKioskToMenu];
         return YES;
     }
 
@@ -1701,11 +1883,11 @@ static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType 
         CGKeyCode keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
         BOOL repeat = CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) != 0;
 
-        // Grown-up quit chord: Control + Option + Shift + Q (physical Q == 12).
+        // Grown-up chord: Control + Option + Shift + Q (physical Q == 12) leaves
+        // the kiosk and returns to the menu (it no longer quits the app).
         if (ctrl && alt && shift && !cmd && keyCode == 12) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                [host emitShutdown];
-                [host stop];
+                [host exitKioskToMenu];
             });
             return NULL;
         }

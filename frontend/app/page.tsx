@@ -1,19 +1,38 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /* ------------------------------------------------------------------ *
  * KeyParty — a key-smashing game for kids.
  *
- * Every key makes a different splash of color and a different sound.
- * The native shell (see native/appkit_host.m) runs this full-screen in
- * kiosk mode and swallows every OS shortcut with a global event tap, so
- * nothing the child presses can quit the game, switch apps, or poke the
- * operating system. Swallowed keys are forwarded back to this UI as a
- * native "key" event, so even Cmd/Ctrl/Option chords and lone modifiers
+ * The app opens at a small "menu" (Start / Quit / accessibility setup).
+ * Pressing Start asks the native shell (see native/appkit_host.m) to enter
+ * kiosk mode: full-screen, with a global event tap that swallows every OS
+ * shortcut so nothing the child presses can quit the game, switch apps, or
+ * poke the operating system. Swallowed keys are forwarded back to this UI as
+ * a native "key" event, so even Cmd/Ctrl/Option chords and lone modifiers
  * still make something happen on screen. Clicks and drags paint too.
- * The only way out is the grown-up chord: Control + Option + Shift + Q.
+ *
+ * Every key makes a different splash of color and a different sound. The
+ * grown-up chord — Control + Option + Shift + Q — leaves the game and returns
+ * to the menu (the native tap drives it in kiosk; the DOM path below handles
+ * it in plain-browser / KEYPARTY_NO_KIOSK dev mode).
  * ------------------------------------------------------------------ */
+
+type Mode = "menu" | "playing";
+
+type AccessibilityStatus = { trusted: boolean; kioskEnabled: boolean };
+
+/** The window.keyparty shim the native shell injects (absent in a plain browser). */
+type KeyPartyBridge = {
+  start?: () => void;
+  quit?: () => void;
+  requestAccessibility?: () => void;
+  checkAccessibility?: () => void;
+};
+
+const keyPartyBridge = (): KeyPartyBridge | undefined =>
+  (window as unknown as { keyparty?: KeyPartyBridge }).keyparty;
 
 type Shape = "circle" | "star" | "square" | "triangle" | "ring";
 
@@ -119,6 +138,52 @@ export default function Home() {
   const hintRef = useRef<HTMLDivElement>(null);
   const startRef = useRef<HTMLDivElement>(null);
   const counterRef = useRef<HTMLDivElement>(null);
+
+  // "menu" shows the Start/Quit screen; "playing" runs the game. The game
+  // effect reads modeRef (a ref, so it always sees the latest value without
+  // re-running the effect); React renders the menu off the `mode` state.
+  const [mode, setMode] = useState<Mode>("menu");
+  const modeRef = useRef<Mode>("menu");
+  const [hasNative, setHasNative] = useState(false);
+  const [accessibility, setAccessibility] = useState<AccessibilityStatus | null>(null);
+  // Imperative hooks into the game engine, published by the game effect.
+  const engineRef = useRef<{ enterPlaying: () => void; returnToMenu: () => void } | null>(null);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  // Detect the native shell and keep the Accessibility status fresh while the
+  // menu is up, so "Grant Access…" flips to "ready" the moment the grown-up
+  // toggles KeyParty on in System Settings (no restart needed).
+  useEffect(() => {
+    const kp = keyPartyBridge();
+    const native = typeof kp !== "undefined";
+    setHasNative(native);
+    if (!kp) return;
+    kp.checkAccessibility?.();
+    const id = window.setInterval(() => {
+      if (modeRef.current === "menu") keyPartyBridge()?.checkAccessibility?.();
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const handleStart = () => {
+    // Switch the UI to the game immediately (responsive), then ask the native
+    // shell to lock down. In a plain browser there's no shell — the UI just plays.
+    engineRef.current?.enterPlaying();
+    keyPartyBridge()?.start?.();
+  };
+
+  const handleQuit = () => {
+    const kp = keyPartyBridge();
+    if (kp?.quit) kp.quit();
+    else window.close();
+  };
+
+  const handleGrantAccess = () => {
+    keyPartyBridge()?.requestAccessibility?.();
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -600,6 +665,8 @@ export default function Home() {
       info.code !== "Other" && !MODIFIER_CODES.has(info.code);
 
     const handleKey = (info: KeyInfo) => {
+      // Only the game consumes keys; in the menu they belong to the buttons.
+      if (modeRef.current !== "playing") return;
       // Ignore OS auto-repeat — the loop drives repeats for ALL held keys, so a
       // single OS-repeating key would otherwise fire twice as fast as the rest.
       if (info.repeat) return;
@@ -666,8 +733,16 @@ export default function Home() {
     // 2) Browser/dev path: when the tap is not active (plain browser, or
     //    KEYPARTY_NO_KIOSK=1), the keys reach the webview as DOM events.
     const onKeyDown = (e: KeyboardEvent) => {
+      // In the menu, keys belong to the buttons (Tab/Enter/Space) — don't touch them.
+      if (modeRef.current !== "playing") return;
       // The game owns every keystroke — no scrolling, quick-find, or focus moves.
       e.preventDefault();
+      // Grown-up chord (browser / KEYPARTY_NO_KIOSK dev path, where there's no
+      // native tap to catch it): Control + Option + Shift + Q returns to the menu.
+      if (e.ctrlKey && e.altKey && e.shiftKey && !e.metaKey && e.code === "KeyQ") {
+        engineRef.current?.returnToMenu();
+        return;
+      }
       handleKey({
         code: e.code,
         key: e.key,
@@ -679,6 +754,7 @@ export default function Home() {
       });
     };
     const onKeyUp = (e: KeyboardEvent) => {
+      if (modeRef.current !== "playing") return;
       e.preventDefault();
       releaseKey(e.code);
     };
@@ -728,6 +804,7 @@ export default function Home() {
     };
 
     const onPointerDown = (e: PointerEvent) => {
+      if (modeRef.current !== "playing") return; // menu clicks belong to the buttons
       pointer.x = e.clientX;
       pointer.y = e.clientY;
       pointer.active = true;
@@ -740,6 +817,7 @@ export default function Home() {
     };
 
     const onPointerMove = (e: PointerEvent) => {
+      if (modeRef.current !== "playing") return; // no canvas cursor/paint over the menu
       pointer.x = e.clientX;
       pointer.y = e.clientY;
       pointer.vis = true;
@@ -771,6 +849,62 @@ export default function Home() {
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
     window.addEventListener("pointerleave", onPointerLeave);
+
+    /* ----------------------- menu / play transitions ---------------- */
+    // Shared by the menu buttons and the native shell (Start → playing;
+    // quit chord → menu). Each transition wipes the field so the screen is
+    // clean on the way in and behind the menu on the way out.
+    const clearField = () => {
+      particles.length = 0;
+      rings.length = 0;
+      glyphs.length = 0;
+      shake = 0;
+    };
+    const enterPlaying = () => {
+      clearField();
+      releaseAllKeys();
+      count = 0;
+      if (counterRef.current) {
+        counterRef.current.textContent = "0";
+        counterRef.current.classList.remove("show");
+      }
+      if (startRef.current) startRef.current.classList.remove("hidden");
+      modeRef.current = "playing";
+      setMode("playing");
+    };
+    const returnToMenu = () => {
+      clearField();
+      releaseAllKeys();
+      count = 0;
+      pointer.active = false;
+      pointer.vis = false;
+      if (counterRef.current) {
+        counterRef.current.textContent = "0";
+        counterRef.current.classList.remove("show");
+      }
+      modeRef.current = "menu";
+      setMode("menu");
+    };
+    engineRef.current = { enterPlaying, returnToMenu };
+
+    // The native shell drives these in kiosk mode: "keyparty:menu" when the
+    // quit chord is hit, "keyparty:playing" once the kiosk window is up.
+    const onNativeMenu = () => returnToMenu();
+    const onNativePlaying = () => enterPlaying();
+    const onNativeAccessibility = (detail: unknown) => {
+      const d = (detail ?? {}) as Partial<AccessibilityStatus>;
+      setAccessibility({ trusted: !!d.trusted, kioskEnabled: !!d.kioskEnabled });
+    };
+    zero?.on?.("keyparty:menu", onNativeMenu);
+    zero?.on?.("keyparty:playing", onNativePlaying);
+    zero?.on?.("keyparty:accessibility", onNativeAccessibility);
+    const onNativeMenuEvent = () => returnToMenu();
+    const onNativePlayingEvent = () => enterPlaying();
+    const onNativeAccessibilityEvent = (e: Event) =>
+      onNativeAccessibility((e as CustomEvent).detail);
+    window.addEventListener("zero-native:keyparty:menu", onNativeMenuEvent);
+    window.addEventListener("zero-native:keyparty:playing", onNativePlayingEvent);
+    window.addEventListener("zero-native:keyparty:accessibility", onNativeAccessibilityEvent);
 
     /* ------------------------- draw helpers ------------------------ */
     // Pre-rendered glow sprites: the soft radial halo each particle used to get
@@ -1048,6 +1182,10 @@ export default function Home() {
       window.removeEventListener("zero-native:key", onNativeKeyEvent as EventListener);
       window.removeEventListener("zero-native:keyup", onNativeKeyUpEvent as EventListener);
       window.removeEventListener("zero-native:hint", showHint as EventListener);
+      window.removeEventListener("zero-native:keyparty:menu", onNativeMenuEvent);
+      window.removeEventListener("zero-native:keyparty:playing", onNativePlayingEvent);
+      window.removeEventListener("zero-native:keyparty:accessibility", onNativeAccessibilityEvent);
+      engineRef.current = null;
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
@@ -1058,8 +1196,10 @@ export default function Home() {
     };
   }, []);
 
+  const showAccess = hasNative && accessibility?.kioskEnabled;
+
   return (
-    <div className="stage">
+    <div className={mode === "menu" ? "stage stage-menu" : "stage"}>
       <canvas ref={canvasRef} />
       <div ref={counterRef} className="counter">0</div>
       <div ref={startRef} className="start">
@@ -1067,8 +1207,56 @@ export default function Home() {
         <small>🎹 🌈 🎉 — or click and drag</small>
       </div>
       <div ref={hintRef} className="hint">
-        Grown-ups: hold <kbd>Control</kbd> + <kbd>Option</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> to quit
+        Grown-ups: hold <kbd>Control</kbd> + <kbd>Option</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> to go back to the menu
       </div>
+
+      {mode === "menu" && (
+        <div className="menu" role="dialog" aria-modal="true" aria-label="KeyParty menu">
+          <div className="menu-card">
+            <h1 className="menu-title">KeyParty</h1>
+            <p className="menu-sub">A key-smashing party for little hands 🎹🌈🎉</p>
+
+            <div className="menu-actions">
+              <button type="button" className="btn btn-start" onClick={handleStart} autoFocus>
+                ▶ Start
+              </button>
+              <button type="button" className="btn btn-quit" onClick={handleQuit}>
+                ✕ Quit
+              </button>
+            </div>
+
+            {showAccess && (
+              <div className={`access ${accessibility?.trusted ? "ok" : "warn"}`}>
+                {accessibility?.trusted ? (
+                  <span className="access-line">
+                    🔒 Keyboard lock ready — every key is safe to smash.
+                  </span>
+                ) : (
+                  <>
+                    <span className="access-line">
+                      ⚠ KeyParty needs <strong>Accessibility</strong> permission so it can lock the
+                      keyboard while playing — otherwise a child could press a system shortcut and
+                      slip out of the game.
+                    </span>
+                    <button type="button" className="btn btn-grant" onClick={handleGrantAccess}>
+                      Grant Accessibility Access…
+                    </button>
+                    <span className="access-hint">
+                      Turn on “KeyParty” in System Settings → Privacy &amp; Security → Accessibility,
+                      then come back here. You can still Start without it.
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+
+            <p className="menu-foot">
+              While playing, press <kbd>Control</kbd>+<kbd>Option</kbd>+<kbd>Shift</kbd>+
+              <kbd>Q</kbd> to return here.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
