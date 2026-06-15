@@ -310,9 +310,13 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
     } else if (platform == .windows) {
         // GUI app, not a console app — otherwise Windows opens a terminal window
-        // alongside the game. Zig's start code provides the WinMain entry point;
-        // `pub fn main` still runs. (Dev logs go to files via ZERO_NATIVE_LOG_DIR.)
+        // alongside the game. The MSVC CRT's GUI startup (WinMainCRTStartup) wants
+        // a WinMain, but our entry is the Zig/C `main`, so keep the console CRT
+        // startup (mainCRTStartup, which calls main) while still marking the binary
+        // as a GUI subsystem so no console is allocated. (Dev logs go to files via
+        // ZERO_NATIVE_LOG_DIR.)
         exe.subsystem = .Windows;
+        exe.entry = .{ .symbol_name = "mainCRTStartup" };
         switch (web_engine) {
             // KeyParty vendors a patched copy of the WebView2 host (native/webview2_host.cpp)
             // that adds full-screen kiosk mode, the global key-blocking hook, the quit
