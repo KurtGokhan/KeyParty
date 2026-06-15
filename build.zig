@@ -309,6 +309,10 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkSystemLibrary("c", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
     } else if (platform == .windows) {
+        // GUI app, not a console app — otherwise Windows opens a terminal window
+        // alongside the game. Zig's start code provides the WinMain entry point;
+        // `pub fn main` still runs. (Dev logs go to files via ZERO_NATIVE_LOG_DIR.)
+        exe.subsystem = .Windows;
         switch (web_engine) {
             // KeyParty vendors a patched copy of the WebView2 host (native/webview2_host.cpp)
             // that adds full-screen kiosk mode, the global key-blocking hook, the quit
