@@ -53,6 +53,17 @@ jobs:
     needs: release
     if: needs.release.outputs.published == 'true'
     runs-on: macos-latest
+    # Signing + notarization secrets. When unset, the signing steps below are
+    # skipped and the build ships unsigned (first launch needs right-click →
+    # Open). Set all of them to ship a signed, notarized .dmg with no Gatekeeper
+    # prompt. See "Code signing" in README.md for how to obtain each.
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
     steps:
       - uses: actions/checkout@v6
 
@@ -82,6 +93,33 @@ jobs:
             -Doptimize=ReleaseFast \
             -Dpackage-target=macos
 
+      - name: Import Developer ID certificate
+        if: ${{ env.MACOS_CERTIFICATE != '' }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PWD="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN" >/dev/null
+          # Put the temp keychain on the search list so codesign finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | sed s/\"//g)
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign the app (Developer ID + Hardened Runtime)
+        if: ${{ env.MACOS_CERTIFICATE != '' }}
+        run: |
+          APP="$(ls -d zig-out/package/*.app | head -n1)"
+          codesign --force --deep --options runtime --timestamp \
+            --entitlements assets/keyparty.entitlements \
+            --sign "$MACOS_SIGN_IDENTITY" "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+
       - name: Build a .dmg (drag-to-Applications)
         run: |
           APP="$(ls -d zig-out/package/*.app | head -n1)"
@@ -92,6 +130,25 @@ jobs:
           cp -R "$APP" "$STAGE/Key Party.app"
           ln -s /Applications "$STAGE/Applications"
           hdiutil create -volname "Key Party" -srcfolder "$STAGE" -ov -format UDZO "keyparty-macos.dmg"
+
+      - name: Sign & notarize the .dmg
+        if: ${{ env.MACOS_CERTIFICATE != '' }}
+        run: |
+          codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "keyparty-macos.dmg"
+          if [ -n "$APPLE_NOTARY_KEY" ]; then
+            echo "$APPLE_NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            # --wait blocks until Apple finishes; staple embeds the ticket so the
+            # .dmg launches offline with no Gatekeeper prompt.
+            xcrun notarytool submit "keyparty-macos.dmg" \
+              --key "$RUNNER_TEMP/notary.p8" \
+              --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER" \
+              --wait
+            xcrun stapler staple "keyparty-macos.dmg"
+            rm -f "$RUNNER_TEMP/notary.p8"
+          else
+            echo "::warning::APPLE_NOTARY_KEY unset — .dmg is signed but NOT notarized; Gatekeeper will still warn."
+          fi
 
       - name: Attach the .dmg to the release
         # Version-less name -> https://github.com/<owner>/<repo>/releases/latest/download/keyparty-macos.dmg
@@ -108,6 +165,10 @@ jobs:
     env:
       # Where the WebView2 SDK headers land (NuGet, version stripped).
       NUGET_DIR: packages/Microsoft.Web.WebView2
+      # Code signing is scaffolded but inert. Set this secret AND drop a real
+      # signing command into the "Sign the Windows exe" step to enable it (see
+      # "Code signing" in README.md). Until then the exe ships unsigned.
+      WINDOWS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
     steps:
       - uses: actions/checkout@v6
 
@@ -166,6 +227,19 @@ jobs:
           test -f zig-out/bin/keyparty.exe || { echo "ERROR: no exe produced"; ls -R zig-out; exit 1; }
           # Version-less name -> .../releases/latest/download/keyparty-windows.exe is stable.
           cp zig-out/bin/keyparty.exe "keyparty-windows.exe"
+
+      - name: Sign the Windows exe (scaffold — skipped until a cert is configured)
+        # Inert today (no WINDOWS_SIGN_CERT secret). Public-trust Windows certs now
+        # require hardware/cloud key storage, so plug your provider in here:
+        #   • Microsoft Trusted Signing: azure/trusted-signing-action@v0
+        #   • DigiCert KeyLocker / SSL.com eSigner: the provider's signtool dlib
+        #   • signtool: signtool sign /fd SHA256 /tr <timestamp-url> /td SHA256 keyparty-windows.exe
+        # Replace the echo with the real command; the signed exe then flows through
+        # to the existing upload step unchanged.
+        if: ${{ env.WINDOWS_SIGN_CERT != '' }}
+        shell: bash
+        run: |
+          echo "TODO: sign keyparty-windows.exe (see step comment for provider options)."
 
       - name: Attach the binary to the release
         shell: bash

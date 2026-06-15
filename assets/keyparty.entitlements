@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Key Party is a Developer ID (non-sandboxed) app that hosts a WKWebView.
+
+    WKWebView runs its JavaScript out-of-process in the system WebKit content
+    process (com.apple.WebKit.WebContent), which is Apple-signed and does NOT
+    inherit these entitlements — so, unlike Electron/CEF, the host needs no
+    `com.apple.security.cs.allow-jit` or unsigned-executable-memory entitlement.
+
+    The kiosk keyboard lock uses a CGEventTap gated by the runtime Accessibility
+    (TCC) grant the user toggles in System Settings — a runtime permission, not a
+    signing entitlement — so nothing is required for it here either.
+
+    Intentionally empty. The codesign step in .github/workflows/release.yml signs
+    with --options runtime (Hardened Runtime, required for notarization) using
+    this file; add an entitlement below only if a future capability needs one.
+  -->
+</dict>
+</plist>
