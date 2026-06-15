@@ -13,6 +13,7 @@ on:
       - "build.zig.zon"
       - "app.zon"
       - "frontend/**"
+      - "scripts/embed-assets.mjs"
       - ".github/workflows/windows-build.yml"
 
 permissions:
@@ -54,54 +55,33 @@ jobs:
         shell: bash
         run: nuget install Microsoft.Web.WebView2 -OutputDirectory packages -ExcludeVersion
 
-      - name: Build & package the Windows app
+      - name: Build the single-file Windows exe
         shell: bash
         run: |
-          # Absolute include paths (relative -I can miss in Zig's compile sandbox).
           WV2_INC="$GITHUB_WORKSPACE/$NUGET_DIR/build/native/include"
-          # wrl.h lives in the Windows SDK "winrt" folder, which Zig's msvc target
-          # does not add automatically. msvc-dev-cmd exports the SDK version as
-          # $WindowsSDKVersion (note the case — bash names are case-sensitive); if
-          # that path doesn't pan out, fall back to the winrt entry on $INCLUDE.
-          WINRT="${WindowsSdkDir}Include/${WindowsSDKVersion}winrt"
-          if [ ! -f "$WINRT/wrl.h" ]; then
-            WINRT=$(echo "$INCLUDE" | tr ';' '\n' | grep -iE '[\\/]winrt$' | head -n1)
-          fi
+          WV2_LIB="$GITHUB_WORKSPACE/$NUGET_DIR/build/native/x64"
           echo "WebView2 include: $WV2_INC"
-          echo "winrt include:    $WINRT"
-          # Fail loudly if the headers are missing — otherwise the host silently
-          # compiles to a blank-window stub (ZERO_NATIVE_HAS_WEBVIEW2 = 0).
+          echo "WebView2 lib:     $WV2_LIB"
+          # Fail loudly if the SDK pieces are missing: without WebView2.h the host
+          # silently compiles to a blank-window stub; without the static loader lib
+          # it can't link a self-contained exe.
           test -f "$WV2_INC/WebView2.h" || { echo "ERROR: WebView2.h not found at $WV2_INC"; ls -R "$GITHUB_WORKSPACE/$NUGET_DIR" 2>/dev/null | head -40; exit 1; }
-          test -f "$WINRT/wrl.h" || { echo "ERROR: wrl.h not found at $WINRT"; exit 1; }
-          zig build package \
+          test -f "$WV2_LIB/WebView2LoaderStatic.lib" || { echo "ERROR: WebView2LoaderStatic.lib not found at $WV2_LIB"; exit 1; }
+          # The frontend is embedded into the exe (served from memory) and the
+          # WebView2 loader is static-linked, so the result is a single
+          # self-contained keyparty.exe. cl.exe (the host compiler) finds the
+          # Windows SDK + winrt (wrl.h) via %INCLUDE%.
+          zig build \
             -Dtarget=x86_64-windows-msvc \
             -Doptimize=ReleaseFast \
-            -Dpackage-target=windows \
             -Dwebview2-include="$WV2_INC" \
-            -Dwinrt-include="$WINRT"
-
-      - name: Bundle the WebView2 loader and stage the package
-        shell: bash
-        run: |
-          EXE=$(find zig-out/package -name '*.exe' | head -n1)
-          if [ -z "$EXE" ]; then echo "no .exe produced"; ls -R zig-out/package; exit 1; fi
-          BIN_DIR=$(dirname "$EXE")            # <pkg>/bin
-          PKG_ROOT=$(dirname "$BIN_DIR")       # <pkg>  (also holds resources/dist)
-          # Loaded dynamically at runtime, so it must sit next to keyparty.exe.
-          cp "$GITHUB_WORKSPACE/$NUGET_DIR/build/native/x64/WebView2Loader.dll" "$BIN_DIR/"
-          # The host loads the frontend from <exe>/../resources/<dist> (dist is
-          # "frontend/out" here) — fail loudly if packaging didn't bundle it,
-          # instead of shipping a blank window.
-          test -n "$(find "$PKG_ROOT/resources" -name index.html 2>/dev/null | head -n1)" || {
-            echo "ERROR: frontend index.html missing under $PKG_ROOT/resources";
-            ls -R "$PKG_ROOT"; exit 1;
-          }
-          # Upload the whole package (bin/ + resources/), not just the exe.
-          echo "PKG_DIR=$PKG_ROOT" >> "$GITHUB_ENV"
+            -Dwebview2-lib-dir="$WV2_LIB"
+          test -f zig-out/bin/keyparty.exe || { echo "ERROR: no exe produced"; ls -R zig-out; exit 1; }
+          ls -lh zig-out/bin/keyparty.exe
 
       - name: Upload the Windows build
         uses: actions/upload-artifact@v4
         with:
           name: keyparty-windows
-          path: ${{ env.PKG_DIR }}
+          path: zig-out/bin/keyparty.exe
           if-no-files-found: error

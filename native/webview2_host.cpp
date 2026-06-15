@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <objbase.h>
+#include <shlwapi.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -147,6 +148,11 @@ struct Host {
     // KeyParty: per-process WebView2 user-data folder + kiosk lock state.
     std::wstring user_data_folder;
     bool kiosk_active = false;
+#if ZERO_NATIVE_HAS_WEBVIEW2
+    // Kept alive so the WebResourceRequested handler can build responses
+    // (CreateWebResourceResponse lives on the environment).
+    ComPtr<ICoreWebView2Environment> environment;
+#endif
 };
 
 static std::string slice(const char *bytes, size_t len) {
@@ -284,6 +290,11 @@ static void destroyAllWindows(Host *host) {
 #if ZERO_NATIVE_HAS_WEBVIEW2
 using CreateEnvironmentFn = HRESULT (STDAPICALLTYPE *)(PCWSTR, PCWSTR, ICoreWebView2EnvironmentOptions *, ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *);
 
+// The frontend is embedded in the executable (see scripts/embed-assets.mjs and
+// the generated translation unit). Returns 1 and fills the out-params if `path`
+// (posix, relative to the asset root, e.g. "index.html") is bundled.
+extern "C" int keyparty_asset_lookup(const char *path, const unsigned char **data, size_t *len, const char **mime);
+
 static RECT webViewRect(const ChildWebView &webview) {
     RECT rect = {};
     rect.left = 0;
@@ -294,9 +305,10 @@ static RECT webViewRect(const ChildWebView &webview) {
 }
 
 static CreateEnvironmentFn webView2Factory() {
-    static HMODULE loader = LoadLibraryW(L"WebView2Loader.dll");
-    if (!loader) return nullptr;
-    return reinterpret_cast<CreateEnvironmentFn>(GetProcAddress(loader, "CreateCoreWebView2EnvironmentWithOptions"));
+    // Statically linked (WebView2LoaderStatic.lib) so the app is a single exe —
+    // no WebView2Loader.dll to ship next to it. The loader resolves the installed
+    // Evergreen runtime at runtime as usual.
+    return &CreateCoreWebView2EnvironmentWithOptions;
 }
 
 static void cleanupPendingChildWebView(Host *host, const std::string &key) {
@@ -798,9 +810,6 @@ Object.defineProperty(window,'keyparty',{value:Object.freeze({start:function(){p
 }
 
 #if ZERO_NATIVE_HAS_WEBVIEW2
-// The asset folder we last mapped, kept for the load-failure diagnostic below.
-static std::wstring g_main_asset_folder;
-
 static bool dirExists(const std::wstring &path) {
     if (path.empty()) return false;
     DWORD attrs = GetFileAttributesW(path.c_str());
@@ -867,8 +876,10 @@ static void applyMainLoad(Host *host, Window &w) {
     } else if (w.load_kind == 2) {
         ComPtr<ICoreWebView2_3> wv3;
         if (SUCCEEDED(w.main_webview.As(&wv3)) && wv3) {
+            // Defensive fallback only: the frontend is normally served from the
+            // embedded blob via WebResourceRequested. If a package still ships an
+            // on-disk resources folder, this lets it answer anything not embedded.
             std::wstring folder = resolveAssetRoot(w.asset_root);
-            g_main_asset_folder = folder;
             wv3->SetVirtualHostNameToFolderMapping(kAssetHost, folder.c_str(),
                                                    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
         }
@@ -916,6 +927,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                             L"KeyParty", MB_OK | MB_ICONERROR);
                 return result;
             }
+            host->environment = environment;  // for CreateWebResourceResponse later
             auto found = host->windows.find(window_id);
             if (found == host->windows.end() || found->second.hwnd != hwnd || !IsWindow(hwnd)) return S_OK;
             return environment->CreateCoreWebView2Controller(hwnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
@@ -1036,19 +1048,75 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                     args->get_WebErrorStatus(&status);
                                     std::wstring msg = L"The page failed to load (web error status ";
                                     msg += std::to_wstring((int)status);
-                                    msg += L").";
-                                    if (!g_main_asset_folder.empty()) {
-                                        msg += L"\n\nExpected the bundled frontend at:\n";
-                                        msg += g_main_asset_folder;
-                                        if (!dirExists(g_main_asset_folder))
-                                            msg += L"\n\nThat folder does not exist — the package is "
-                                                   L"missing its resources\\dist directory.";
-                                    }
+                                    msg += L").\n\nThe frontend is embedded in the executable, so this "
+                                           L"usually means the WebView2 runtime is missing or blocked "
+                                           L"(it ships with Windows 11 and current Windows 10; otherwise "
+                                           L"install the Evergreen runtime).";
                                     MessageBoxW(nullptr, msg.c_str(), L"KeyParty",
                                                 MB_OK | MB_ICONWARNING);
                                 }
                                 return S_OK;
                             }).Get(), &navc_token);
+
+                        // Serve the frontend embedded in the exe (single-file: no
+                        // resources folder needed). We answer requests under the
+                        // asset host from the in-binary blob; anything we don't have
+                        // is left unhandled so the on-disk folder mapping (if the
+                        // package still ships one) can still answer it.
+                        w.main_webview->AddWebResourceRequestedFilter(
+                            (std::wstring(kAssetBaseUrl) + L"*").c_str(),
+                            COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+                        EventRegistrationToken wrr_token = {};
+                        w.main_webview->add_WebResourceRequested(Callback<ICoreWebView2WebResourceRequestedEventHandler>(
+                            [host, window_id, lifetime](ICoreWebView2 *, ICoreWebView2WebResourceRequestedEventArgs *args) -> HRESULT {
+                                auto token = lifetime.lock();
+                                if (!token) return S_OK;
+                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                                if (!token->alive || !args) return S_OK;
+                                ComPtr<ICoreWebView2Environment> env = host->environment;
+                                if (!env) return S_OK;
+                                ComPtr<ICoreWebView2WebResourceRequest> request;
+                                if (FAILED(args->get_Request(&request)) || !request) return S_OK;
+                                LPWSTR uri_raw = nullptr;
+                                if (FAILED(request->get_Uri(&uri_raw)) || !uri_raw) return S_OK;
+                                std::wstring uri(uri_raw);
+                                CoTaskMemFree(uri_raw);
+
+                                std::wstring base(kAssetBaseUrl);
+                                if (uri.rfind(base, 0) != 0) return S_OK;  // not our host
+                                std::wstring rel = uri.substr(base.size());
+                                size_t cut = rel.find_first_of(L"?#");
+                                if (cut != std::wstring::npos) rel = rel.substr(0, cut);
+                                while (!rel.empty() && rel.front() == L'/') rel.erase(0, 1);
+                                std::string path = narrow(rel);
+                                if (path.empty()) path = "index.html";
+
+                                const unsigned char *data = nullptr;
+                                size_t len = 0;
+                                const char *mime = nullptr;
+                                bool found = keyparty_asset_lookup(path.c_str(), &data, &len, &mime) != 0;
+                                if (!found) {
+                                    bool spa = false;
+                                    auto wi = host->windows.find(window_id);
+                                    if (wi != host->windows.end()) spa = wi->second.spa_fallback;
+                                    // Client-side route (no extension in last segment) -> index.html.
+                                    size_t slash = path.find_last_of('/');
+                                    std::string last = slash == std::string::npos ? path : path.substr(slash + 1);
+                                    if (spa && last.find('.') == std::string::npos)
+                                        found = keyparty_asset_lookup("index.html", &data, &len, &mime) != 0;
+                                }
+                                if (!found) return S_OK;  // leave to default handling
+
+                                ComPtr<IStream> stream;
+                                stream.Attach(SHCreateMemStream(data, (UINT)len));
+                                if (!stream) return S_OK;
+                                std::wstring headers = L"Content-Type: " + widen(mime) + L"\r\n";
+                                ComPtr<ICoreWebView2WebResourceResponse> response;
+                                if (SUCCEEDED(env->CreateWebResourceResponse(stream.Get(), 200, L"OK", headers.c_str(), &response)) && response) {
+                                    args->put_Response(response.Get());
+                                }
+                                return S_OK;
+                            }).Get(), &wrr_token);
                     }
                     applyMainLoad(host, w);
                     return S_OK;

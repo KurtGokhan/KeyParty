@@ -27,8 +27,9 @@ Initial release of KeyParty — a full-screen, kid-proof key-smashing toy where 
 **Windows kiosk lockdown**
 
 - Covers the whole monitor — borderless, topmost, taskbar included.
-- A global low-level keyboard hook swallows every shortcut (Win, Alt+Tab, Alt+Esc, Alt+F4, Ctrl+Esc, F5/refresh, …) and still turns each press into an on-screen effect. No special permission is needed.
+- A global low-level keyboard hook swallows every shortcut (Win, Alt+Tab, Alt+Esc, Alt+F4, Ctrl+Esc, F5/refresh, …) and still turns each press into an on-screen effect. No special permission is needed. The grown-up **Control + Alt + Shift + Q** chord returns to the menu.
 - Built on a WebView2 host with the same bridge as macOS, so the game UI behaves identically. (Ctrl+Alt+Del is the one sequence Windows reserves for itself.)
+- Ships as a single self-contained `keyparty.exe` — the frontend is embedded in the executable and the WebView2 loader is static-linked, so there's no DLL or assets folder to ship (only the WebView2 Evergreen runtime, which is already on Windows 11 / current Windows 10).
 
 **Web**
 

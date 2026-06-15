@@ -108,9 +108,15 @@ never scrolls, quick-finds, or moves focus.
 Windows uses a patched copy of zero-native's WebView2 host,
 [`native/webview2_host.cpp`](native/webview2_host.cpp). The upstream host only
 opened a bare window, so this copy also adds the main-window WebView2 (serving the
-bundled frontend), the same `window.zero` / `window.keyparty` bridge as macOS, and
+embedded frontend), the same `window.zero` / `window.keyparty` bridge as macOS, and
 the kiosk lockdown. The **shared web UI is unchanged** — it sees the same bridge
 events on both platforms.
+
+The Windows build is a **single self-contained `keyparty.exe`**: the frontend is
+embedded in the executable (a build step packs `frontend/out` into a byte blob —
+see [`scripts/embed-assets.mjs`](scripts/embed-assets.mjs) — which the host serves
+from memory over `WebResourceRequested`), and the WebView2 loader is statically
+linked, so there's no `WebView2Loader.dll` and no `resources/` folder to ship.
 
 On **Start** it:
 
@@ -126,9 +132,9 @@ The one shortcut Windows will not let any app intercept is **Ctrl + Alt + Del**
 (the Secure Attention Sequence) — blocking it needs the OS Assigned Access / kiosk
 policy, which is outside the app.
 
-The packaged app loads the **WebView2** runtime (the Evergreen runtime ships with
-Windows 11 and current Windows 10) via `WebView2Loader.dll`, which is bundled next
-to the executable.
+The exe still needs the **WebView2** Evergreen *runtime* installed (it ships with
+Windows 11 and current Windows 10); only the loader is linked in, not the runtime
+itself.
 
 ### Development mode
 
@@ -169,22 +175,24 @@ globally with `npm i -g zero-native@0.2.0`.
 On **Windows**, the kiosk host ([`native/webview2_host.cpp`](native/webview2_host.cpp))
 is compiled with **MSVC's `cl.exe`**, not Zig's bundled clang — the WebView2/WRL
 (`wrl.h`) headers are MSVC-flavored and Zig's libc++ can't target the MSVC C++
-ABI. Build from an *x64 Native Tools Command Prompt* (which puts `cl.exe` and the
-Windows SDK on `PATH`/`%INCLUDE%`), passing only the WebView2 SDK headers:
+ABI. The build produces a **single self-contained `keyparty.exe`** (the frontend
+is embedded and the WebView2 loader is static-linked), so it needs both the
+WebView2 SDK headers and the static loader lib. Build from an *x64 Native Tools
+Command Prompt* (which puts `cl.exe` and the Windows SDK on `PATH`/`%INCLUDE%`):
 
 ```sh
-zig build run -Dtarget=x86_64-windows-msvc ^
-  -Dwebview2-include="C:\path\to\Microsoft.Web.WebView2\build\native\include"
+zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseFast ^
+  -Dwebview2-include="C:\path\to\Microsoft.Web.WebView2\build\native\include" ^
+  -Dwebview2-lib-dir="C:\path\to\Microsoft.Web.WebView2\build\native\x64"
 ```
 
-`cl.exe` resolves the Windows SDK, `winrt` (`wrl.h`), and STL headers from
-`%INCLUDE%` on its own; `-Dwinrt-include=...` is still accepted but only needed if
-your `%INCLUDE%` somehow lacks the winrt folder. Omitting `-Dwebview2-include`
-makes the host compile to a blank-window stub (it says so at launch). `zig build
-run` also needs `WebView2Loader.dll` (from the WebView2 SDK's `build/native/x64/`)
-findable at runtime — drop it in the repo root, which the run's working directory
-searches. The WebView2 Evergreen runtime must be installed too (it is on Windows
-11 / current Windows 10).
+The result is `zig-out\bin\keyparty.exe` — one file, no DLL, no `resources\`
+folder. `cl.exe` resolves the Windows SDK, `winrt` (`wrl.h`), and STL headers from
+`%INCLUDE%` on its own (`-Dwinrt-include=...` is accepted but rarely needed).
+Omitting `-Dwebview2-include` makes the host compile to a blank-window stub (it
+says so at launch); omitting `-Dwebview2-lib-dir` fails the link. The embed step
+runs Node, so building also (re)builds the frontend. The WebView2 Evergreen
+runtime must be installed to run (it is on Windows 11 / current Windows 10).
 
 ### Testing a Windows build without a local toolchain
 
@@ -192,9 +200,9 @@ Don't want to install MSVC? Run the **Windows build (test)** workflow
 ([`.github/workflows/windows-build.yml`](.github/workflows/windows-build.yml))
 from the repo's **Actions** tab — or just push a change under `native/`,
 `build.zig`, `app.zon`, or `frontend/` and it runs automatically. Download the
-**keyparty-windows** artifact, unzip it, and run **`bin\keyparty.exe`** — the
-frontend ships alongside it in `resources\frontend\out`, and `WebView2Loader.dll`
-sits next to the exe in `bin\`. No release needed.
+**keyparty-windows** artifact, unzip it, and run **`keyparty.exe`** — it's a
+single self-contained file (frontend embedded, loader static-linked). No release
+needed.
 
 ## Commands
 
@@ -224,17 +232,17 @@ Versioning and releases run on [Changesets](https://github.com/changesets/change
    updates `CHANGELOG.md`, syncs that version into `app.zon`, `build.zig.zon`,
    and `frontend/package.json` (via [`scripts/sync-version.mjs`](scripts/sync-version.mjs)),
    tags the release (`keyparty@x.y.z`), and creates a GitHub Release.
-3. The same workflow then builds the apps (`zig build package`, with the
-   `zero-native` framework installed from npm) on two runners and uploads both to
-   the release:
-   - **macOS** — `keyparty-<version>-macos.zip` (a `.app` bundle). Unsigned, so on
-     first launch users right-click → Open (or clear the quarantine flag).
-   - **Windows** — `keyparty-<version>-windows.zip` (the `.exe`, the bundled
-     frontend, and `WebView2Loader.dll`). Built against the WebView2 SDK headers
-     (restored from NuGet) with the winrt headers from the MSVC dev environment.
-     Unsigned, so SmartScreen shows a "More info → Run anyway" prompt on first
-     launch; the WebView2 Evergreen runtime must be present (it is on Windows 11
-     and current Windows 10).
+3. The same workflow then builds the apps on two runners and uploads both to the
+   release:
+   - **macOS** — `keyparty-<version>-macos.zip` (a `.app` bundle, via `zig build
+     package`). Unsigned, so on first launch users right-click → Open (or clear the
+     quarantine flag).
+   - **Windows** — `keyparty-<version>-windows.exe`, a single self-contained file
+     (frontend embedded, WebView2 loader static-linked), via `zig build` against
+     the WebView2 SDK headers + static loader lib (restored from NuGet). Unsigned,
+     so SmartScreen shows a "More info → Run anyway" prompt on first launch; the
+     WebView2 Evergreen runtime must be present (it is on Windows 11 and current
+     Windows 10).
 
 One-time repo setup:
 

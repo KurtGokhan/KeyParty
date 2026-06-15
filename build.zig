@@ -52,6 +52,10 @@ pub fn build(b: *std.Build) void {
     // target adds um/shared/ucrt but not winrt, so the WebView2 host needs it
     // passed in explicitly (the CI job derives it from the MSVC dev environment).
     const winrt_include = b.option([]const u8, "winrt-include", "Path to the Windows SDK winrt headers (folder containing wrl.h)");
+    // Folder holding WebView2LoaderStatic.lib (the WebView2 NuGet's build/native/x64).
+    // Static-linking the loader means no WebView2Loader.dll to ship — the app is a
+    // single self-contained exe. Required for Windows -Dweb-engine=system builds.
+    const webview2_lib_dir = b.option([]const u8, "webview2-lib-dir", "Path to the WebView2 static loader lib dir (contains WebView2LoaderStatic.lib)");
     const optimize_name = @tagName(optimize);
     // Single source of truth for the version (kept in sync by scripts/sync-version.mjs).
     const app_version = stringField(@embedFile("build.zig.zon"), ".version") orelse "0.0.0";
@@ -103,7 +107,7 @@ pub fn build(b: *std.Build) void {
         .name = app_exe_name,
         .root_module = app_mod,
     });
-    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, zero_native_path, cef_dir, cef_auto_install, webview2_include, winrt_include);
+    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, zero_native_path, cef_dir, cef_auto_install, webview2_include, winrt_include, webview2_lib_dir);
     b.installArtifact(exe);
 
     const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
@@ -114,6 +118,12 @@ pub fn build(b: *std.Build) void {
     frontend_build.step.dependOn(&frontend_install.step);
     const frontend_step = b.step("frontend-build", "Build the frontend");
     frontend_step.dependOn(&frontend_build.step);
+
+    // Single-file Windows: embed the built frontend into the exe (the host serves
+    // it from memory) so there is no resources/ folder to ship alongside it.
+    if (selected_platform == .windows and web_engine == .system) {
+        addWindowsAssetEmbed(b, app_mod, frontend_build);
+    }
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(&frontend_build.step);
@@ -232,7 +242,7 @@ fn externalModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     });
 }
 
-fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, zero_native_path: []const u8, cef_dir: []const u8, cef_auto_install: bool, webview2_include: ?[]const u8, winrt_include: ?[]const u8) void {
+fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, zero_native_path: []const u8, cef_dir: []const u8, cef_auto_install: bool, webview2_include: ?[]const u8, winrt_include: ?[]const u8, webview2_lib_dir: ?[]const u8) void {
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
@@ -348,11 +358,38 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
             // library comes from MSVC's dynamic runtime (msvcprt.lib), not Zig's
             // libc++ — whose libc++abi can't build against the MSVC vcruntime ABI.
             app_mod.linkSystemLibrary("msvcprt", .{});
+            // Static WebView2 loader -> no WebView2Loader.dll to ship (single exe).
+            if (webview2_lib_dir) |dir| {
+                app_mod.addLibraryPath(.{ .cwd_relative = dir });
+                app_mod.linkSystemLibrary("WebView2LoaderStatic", .{});
+            }
+            // SHCreateMemStream (embedded-asset responses) + deps of the static loader.
+            app_mod.linkSystemLibrary("shlwapi", .{});
+            app_mod.linkSystemLibrary("version", .{});
+            app_mod.linkSystemLibrary("advapi32", .{});
         }
         app_mod.linkSystemLibrary("user32", .{});
         app_mod.linkSystemLibrary("ole32", .{});
         app_mod.linkSystemLibrary("shell32", .{});
     }
+}
+
+// Embed the built frontend (frontend/out) into the Windows exe: a Node script
+// generates a C translation unit holding the assets as one byte blob + a lookup
+// table, which cl.exe compiles and we link in. The host (native/webview2_host.cpp)
+// serves it from memory via WebResourceRequested, so the package needs no
+// resources/ folder — the exe is fully self-contained.
+fn addWindowsAssetEmbed(b: *std.Build, app_mod: *std.Build.Module, frontend_build: *std.Build.Step.Run) void {
+    const gen = b.addSystemCommand(&.{ "node", "scripts/embed-assets.mjs" });
+    gen.addArg(b.pathFromRoot("frontend/out"));
+    const gen_c = gen.addOutputFileArg("keyparty_assets.c");
+    gen.step.dependOn(&frontend_build.step); // needs the built frontend on disk
+
+    // cl.exe so the CRT matches the host's (/MD); the file is plain C.
+    const cl = b.addSystemCommand(&.{ "cl", "/nologo", "/c", "/O2", "/MD" });
+    const obj = cl.addPrefixedOutputFileArg("/Fo", "keyparty_assets.obj");
+    cl.addFileArg(gen_c);
+    app_mod.addObjectFile(obj);
 }
 
 fn addCefRuntimeRunFiles(b: *std.Build, target: std.Build.ResolvedTarget, run: *std.Build.Step.Run, exe: *std.Build.Step.Compile, web_engine: WebEngineOption, cef_dir: []const u8) void {
