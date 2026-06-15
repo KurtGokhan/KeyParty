@@ -1,0 +1,5 @@
+// Embeds the app icon into the Windows .exe. The lowest-ID icon group also
+// becomes the icon Explorer shows for the executable itself. Loaded at runtime
+// by native/webview2_host.cpp via LoadImage(MAKEINTRESOURCE(IDI_APPICON)).
+#define IDI_APPICON 1
+IDI_APPICON ICON "icon.ico"

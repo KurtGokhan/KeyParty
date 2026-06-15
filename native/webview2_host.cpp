@@ -44,6 +44,9 @@ using Microsoft::WRL::ComPtr;
 #pragma message("KeyParty WARNING: WebView2.h / wrl.h not found -- building a BLANK-WINDOW stub. Pass -Dwebview2-include and -Dwinrt-include.")
 #endif
 
+// App icon resource id — must match assets/icon.rc (embedded by build.zig).
+#define IDI_APPICON 1
+
 namespace {
 
 enum EventKind {
@@ -1204,6 +1207,12 @@ static ATOM registerClass(Host *host) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = L"ZeroNativeWindowsHost";
+    // App icon, embedded in the exe via assets/icon.rc. Big drives the
+    // Alt-Tab/taskbar icon; small drives the title-bar corner.
+    wc.hIcon = static_cast<HICON>(LoadImageW(host->instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                             GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(host->instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     return RegisterClassExW(&wc);
 }
 
@@ -1225,6 +1234,15 @@ static bool createNativeWindow(Host *host, Window &window) {
         host);
     if (!hwnd) return false;
     window.hwnd = hwnd;
+    // Make sure this window carries the app icon even if the class default is
+    // overridden somewhere — title bar (small) and Alt-Tab/taskbar (big).
+    // (Avoid an identifier named `small`: the Windows SDK's rpcndr.h #defines it.)
+    if (HICON iconBig = static_cast<HICON>(LoadImageW(host->instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                                      GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR)))
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(iconBig));
+    if (HICON iconSmall = static_cast<HICON>(LoadImageW(host->instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                                        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR)))
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(iconSmall));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     SetTimer(hwnd, 1, 16, nullptr);

@@ -108,6 +108,17 @@ pub fn build(b: *std.Build) void {
         .root_module = app_mod,
     });
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, zero_native_path, cef_dir, cef_auto_install, webview2_include, winrt_include, webview2_lib_dir);
+    // Embed the app icon into the Windows exe (assets/icon.rc -> assets/icon.ico).
+    // The lowest-ID icon group is what Explorer/taskbar show for the binary, and
+    // native/webview2_host.cpp loads it by resource id for the window. Zig's
+    // built-in resource compiler (resinator) needs assets/ on its include path so
+    // the .rc's relative reference to icon.ico resolves.
+    if (selected_platform == .windows) {
+        app_mod.addWin32ResourceFile(.{
+            .file = b.path("assets/icon.rc"),
+            .include_paths = &.{b.path("assets")},
+        });
+    }
     b.installArtifact(exe);
 
     const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
