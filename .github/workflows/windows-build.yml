@@ -89,10 +89,11 @@ jobs:
           PKG_ROOT=$(dirname "$BIN_DIR")       # <pkg>  (also holds resources/dist)
           # Loaded dynamically at runtime, so it must sit next to keyparty.exe.
           cp "$GITHUB_WORKSPACE/$NUGET_DIR/build/native/x64/WebView2Loader.dll" "$BIN_DIR/"
-          # The host loads the frontend from <exe>/../resources/dist — fail loudly
-          # if packaging didn't bundle it, instead of shipping a blank window.
-          test -f "$PKG_ROOT/resources/dist/index.html" || {
-            echo "ERROR: frontend missing from package ($PKG_ROOT/resources/dist/index.html)";
+          # The host loads the frontend from <exe>/../resources/<dist> (dist is
+          # "frontend/out" here) — fail loudly if packaging didn't bundle it,
+          # instead of shipping a blank window.
+          test -n "$(find "$PKG_ROOT/resources" -name index.html 2>/dev/null | head -n1)" || {
+            echo "ERROR: frontend index.html missing under $PKG_ROOT/resources";
             ls -R "$PKG_ROOT"; exit 1;
           }
           # Upload the whole package (bin/ + resources/), not just the exe.

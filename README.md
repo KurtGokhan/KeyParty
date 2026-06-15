@@ -193,8 +193,8 @@ Don't want to install MSVC? Run the **Windows build (test)** workflow
 from the repo's **Actions** tab — or just push a change under `native/`,
 `build.zig`, `app.zon`, or `frontend/` and it runs automatically. Download the
 **keyparty-windows** artifact, unzip it, and run **`bin\keyparty.exe`** — the
-frontend ships alongside it in `resources\dist`, and `WebView2Loader.dll` sits
-next to the exe in `bin\`. No release needed.
+frontend ships alongside it in `resources\frontend\out`, and `WebView2Loader.dll`
+sits next to the exe in `bin\`. No release needed.
 
 ## Commands
 
