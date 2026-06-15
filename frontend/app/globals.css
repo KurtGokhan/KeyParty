@@ -165,7 +165,7 @@ canvas {
 }
 
 .menu-card {
-  width: min(580px, 100%);
+  width: min(600px, 100%);
   text-align: center;
   background: rgba(18, 8, 40, 0.86);
   border: 1px solid rgba(255, 255, 255, 0.12);

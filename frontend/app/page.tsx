@@ -801,8 +801,19 @@ export default function Home() {
     window.addEventListener("blur", onBlur);
     document.addEventListener("visibilitychange", onVisibility);
 
-    // Block the context menu / pinch-zoom gestures too, for a clean kiosk.
-    const block = (e: Event) => e.preventDefault();
+    // Block pinch-zoom gestures, and the context menu while playing or in the
+    // native kiosk shell. But on the web build's menu screen (no native shell,
+    // not mid-game) let the normal browser right-click menu through.
+    const block = (e: Event) => {
+      if (
+        e.type === "contextmenu" &&
+        modeRef.current === "menu" &&
+        typeof keyPartyBridge() === "undefined"
+      ) {
+        return;
+      }
+      e.preventDefault();
+    };
     window.addEventListener("contextmenu", block);
     window.addEventListener("gesturestart", block);
 
