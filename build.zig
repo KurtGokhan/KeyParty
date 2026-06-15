@@ -392,6 +392,8 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkSystemLibrary("shell32", .{});
         // DwmSetWindowAttribute — dark/colored title bar (native/webview2_host.cpp).
         app_mod.linkSystemLibrary("dwmapi", .{});
+        // CreateSolidBrush — dark window-class background (native/webview2_host.cpp).
+        app_mod.linkSystemLibrary("gdi32", .{});
     }
 }
 
