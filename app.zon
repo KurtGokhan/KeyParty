@@ -27,6 +27,6 @@
     .web_engine = "system",
     .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
     .windows = .{
-        .{ .label = "main", .title ="Key Party", .width = 720, .height = 480, .restore_state = true },
+        .{ .label = "main", .title ="Key Party", .width = 760, .height = 560, .restore_state = true },
     },
 }

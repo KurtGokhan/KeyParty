@@ -178,7 +178,7 @@ canvas {
   font-size: clamp(2.6rem, 9vw, 4.2rem);
   font-weight: 900;
   letter-spacing: 0.01em;
-  line-height: 1;
+  line-height: normal;
   background: linear-gradient(90deg, #ff5fa2, #ffd23f, #5ff0c0, #5fb8ff, #c08bff);
   -webkit-background-clip: text;
   background-clip: text;
@@ -298,6 +298,42 @@ canvas {
   background: linear-gradient(135deg, #5fb8ff, #c08bff);
   box-shadow: 0 10px 30px rgba(95, 184, 255, 0.4);
   font-size: clamp(0.95rem, 2.2vw, 1.15rem);
+}
+
+.downloads {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Subtle "other platform" link under the primary download button. */
+.dl-alt {
+  color: #cfe6ff;
+  opacity: 0.7;
+  font-weight: 700;
+  font-size: clamp(0.78rem, 1.7vw, 0.92rem);
+  text-decoration: none;
+}
+
+.dl-alt:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+/* Subtle repo link in the menu footer (browser build only). */
+.repo-link {
+  display: inline-block;
+  margin-top: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 700;
+  font-size: clamp(0.72rem, 1.5vw, 0.85rem);
+  text-decoration: none;
+}
+
+.repo-link:hover {
+  color: rgba(255, 255, 255, 0.72);
+  text-decoration: underline;
 }
 
 .menu-foot {

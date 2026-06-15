@@ -452,6 +452,18 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
         [window center];
     }
 
+    // KeyParty: dark window chrome to match the game's deep-purple stage (#0b0420).
+    // A transparent title bar lets the dark window background paint it, so the
+    // frame blends into the game instead of a bright system title bar.
+    window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    window.backgroundColor = [NSColor colorWithSRGBRed:11.0 / 255.0 green:4.0 / 255.0 blue:32.0 / 255.0 alpha:1.0];
+    window.titlebarAppearsTransparent = YES;
+    // The menu window's default size is also its minimum — it can grow but never
+    // shrink below the layout the menu UI is designed for.
+    if (isMainWindow) {
+        window.contentMinSize = NSMakeSize(ZeroNativeKeyPartyMenuWidth, ZeroNativeKeyPartyMenuHeight);
+    }
+
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     ZeroNativeAssetSchemeHandler *assetSchemeHandler = [[ZeroNativeAssetSchemeHandler alloc] init];
     [configuration setURLSchemeHandler:assetSchemeHandler forURLScheme:@"zero"];

@@ -2,6 +2,7 @@
 #include <shellapi.h>
 #include <objbase.h>
 #include <shlwapi.h>
+#include <dwmapi.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -46,6 +47,27 @@ using Microsoft::WRL::ComPtr;
 
 // App icon resource id — must match assets/icon.rc (embedded by build.zig).
 #define IDI_APPICON 1
+
+// Window size floor — matches the framework's default_frame (720x480 in
+// zero-native's WindowOptions). The window can grow but never shrink below this.
+static const LONG kMinWindowWidth = 720;
+static const LONG kMinWindowHeight = 480;
+// Deep-purple window chrome matching the game stage (#0b0420). RGB() packs it
+// into a COLORREF (0x00BBGGRR) for both the title bar and the class background.
+static const COLORREF kFrameColor = RGB(0x0b, 0x04, 0x20);
+
+// DWM attributes for a dark, colored title bar. Defined here in case the
+// available Windows SDK headers predate them; the calls are best-effort and
+// older Windows simply ignores unknown attributes.
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
 
 namespace {
 
@@ -1136,6 +1158,15 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     }
     Host *host = hostFromWindow(hwnd);
     switch (message) {
+        case WM_GETMINMAXINFO: {
+            // The default window size is also its minimum — it can grow but never
+            // shrink below the game's layout. (Only our top-level window uses this
+            // class; the WebView child is a STATIC, which never gets this message.)
+            auto *mmi = reinterpret_cast<MINMAXINFO *>(lparam);
+            mmi->ptMinTrackSize.x = kMinWindowWidth;
+            mmi->ptMinTrackSize.y = kMinWindowHeight;
+            return 0;
+        }
         case WM_SIZE:
             if (host) {
                 for (auto &entry : host->windows) {
@@ -1205,7 +1236,10 @@ static ATOM registerClass(Host *host) {
     wc.lpfnWndProc = windowProc;
     wc.hInstance = host->instance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    // Dark background to match the game — avoids a white flash behind the webview
+    // during load/resize and matches the dark title bar.
+    static HBRUSH frameBrush = CreateSolidBrush(kFrameColor);
+    wc.hbrBackground = frameBrush;
     wc.lpszClassName = L"ZeroNativeWindowsHost";
     // App icon, embedded in the exe via assets/icon.rc. Big drives the
     // Alt-Tab/taskbar icon; small drives the title-bar corner.
@@ -1243,6 +1277,15 @@ static bool createNativeWindow(Host *host, Window &window) {
     if (HICON iconSmall = static_cast<HICON>(LoadImageW(host->instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
                                                         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR)))
         SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(iconSmall));
+    // Dark, deep-purple title bar to match the game. Immersive dark mode flips the
+    // caption dark on Windows 10; the explicit caption/border color paints it the
+    // game's purple on Windows 11. Best-effort — older Windows ignores these.
+    BOOL darkTitleBar = TRUE;
+    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkTitleBar, sizeof(darkTitleBar))))
+        DwmSetWindowAttribute(hwnd, 19, &darkTitleBar, sizeof(darkTitleBar)); // pre-20H1 attribute index
+    COLORREF caption = kFrameColor;
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &caption, sizeof(caption));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     SetTimer(hwnd, 1, 16, nullptr);

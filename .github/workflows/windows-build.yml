@@ -3,7 +3,8 @@ name: Windows build (test)
 # On-demand Windows builds for testing — no release required. Trigger it from the
 # Actions tab ("Run workflow"), or it runs automatically on pushes that touch the
 # native shell / frontend. Download the "keyparty-windows" artifact, unzip, and
-# run keyparty.exe (WebView2Loader.dll is bundled alongside it).
+# run keyparty.exe — a single self-contained file (the frontend is embedded and
+# the WebView2 loader is static-linked, so there's no DLL or assets folder).
 on:
   workflow_dispatch:
   push:
