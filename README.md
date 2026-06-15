@@ -234,10 +234,10 @@ Versioning and releases run on [Changesets](https://github.com/changesets/change
    tags the release (`keyparty@x.y.z`), and creates a GitHub Release.
 3. The same workflow then builds the apps on two runners and uploads both to the
    release:
-   - **macOS** — `keyparty-<version>-macos.zip` (a `.app` bundle, via `zig build
-     package`). Unsigned, so on first launch users right-click → Open (or clear the
-     quarantine flag).
-   - **Windows** — `keyparty-<version>-windows.exe`, a single self-contained file
+   - **macOS** — `keyparty-macos.dmg` (a drag-to-Applications disk image holding
+     `Key Party.app`, built from `zig build package`). Unsigned, so on first launch
+     users right-click → Open (or clear the quarantine flag).
+   - **Windows** — `keyparty-windows.exe`, a single self-contained file
      (frontend embedded, WebView2 loader static-linked), via `zig build` against
      the WebView2 SDK headers + static loader lib (restored from NuGet). Unsigned,
      so SmartScreen shows a "More info → Run anyway" prompt on first launch; the

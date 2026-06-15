@@ -34,9 +34,27 @@ type KeyPartyBridge = {
 const keyPartyBridge = (): KeyPartyBridge | undefined =>
   (window as unknown as { keyparty?: KeyPartyBridge }).keyparty;
 
-// Where the downloadable desktop app lives. Shown only in the browser build,
-// which can't lock the keyboard the way the native kiosk shell does.
-const RELEASES_URL = "https://github.com/KurtGokhan/KeyParty/releases";
+// The GitHub repo and the stable "latest release" download URLs the release
+// workflow publishes (version-less asset names). The desktop note and these
+// links show only in the browser build, which can't lock the keyboard the way
+// the native kiosk shell does.
+const REPO_URL = "https://github.com/KurtGokhan/KeyParty";
+const DOWNLOADS = {
+  mac: `${REPO_URL}/releases/latest/download/keyparty-macos.dmg`,
+  windows: `${REPO_URL}/releases/latest/download/keyparty-windows.exe`,
+};
+
+type DesktopOS = "mac" | "windows" | "other";
+
+// Best-effort guess at the visitor's desktop OS so we can lead with the right
+// download. Runs only in the browser (after mount) to avoid SSR/hydration skew.
+const detectOS = (): DesktopOS => {
+  if (typeof navigator === "undefined") return "other";
+  const ua = navigator.userAgent;
+  if (/Macintosh|Mac OS X/.test(ua)) return "mac";
+  if (/Windows/.test(ua)) return "windows";
+  return "other";
+};
 
 // Set by the GitHub Pages deploy workflow; unset in the native app build. Lets
 // the web build show the "download the app" note and hide Quit deterministically
@@ -157,6 +175,8 @@ export default function Home() {
   // true = native shell present; false = plain browser build.
   const [hasNative, setHasNative] = useState<boolean | null>(null);
   const [accessibility, setAccessibility] = useState<AccessibilityStatus | null>(null);
+  // The visitor's desktop OS, so the browser build leads with the right download.
+  const [os, setOs] = useState<DesktopOS | null>(null);
   // Imperative hooks into the game engine, published by the game effect.
   const engineRef = useRef<{ enterPlaying: () => void; returnToMenu: () => void } | null>(null);
 
@@ -171,6 +191,7 @@ export default function Home() {
     const kp = keyPartyBridge();
     const native = typeof kp !== "undefined";
     setHasNative(native);
+    setOs(detectOS());
     if (!kp) return;
     kp.checkAccessibility?.();
     const id = window.setInterval(() => {
@@ -1275,9 +1296,36 @@ export default function Home() {
                   the browser can’t lock the keyboard, so a child can still press a shortcut and
                   slip out of the game.
                 </span>
-                <a className="btn btn-download" href={RELEASES_URL} target="_blank" rel="noreferrer">
-                  ⬇ Download the app
-                </a>
+                <div className="downloads">
+                  {os === "windows" ? (
+                    <>
+                      <a className="btn btn-download" href={DOWNLOADS.windows} target="_blank" rel="noreferrer">
+                        ⬇ Download for Windows
+                      </a>
+                      <a className="dl-alt" href={DOWNLOADS.mac} target="_blank" rel="noreferrer">
+                        or the macOS version
+                      </a>
+                    </>
+                  ) : os === "mac" ? (
+                    <>
+                      <a className="btn btn-download" href={DOWNLOADS.mac} target="_blank" rel="noreferrer">
+                        ⬇ Download for macOS
+                      </a>
+                      <a className="dl-alt" href={DOWNLOADS.windows} target="_blank" rel="noreferrer">
+                        or the Windows version
+                      </a>
+                    </>
+                  ) : (
+                    <>
+                      <a className="btn btn-download" href={DOWNLOADS.mac} target="_blank" rel="noreferrer">
+                        ⬇ macOS
+                      </a>
+                      <a className="btn btn-download" href={DOWNLOADS.windows} target="_blank" rel="noreferrer">
+                        ⬇ Windows
+                      </a>
+                    </>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1285,6 +1333,12 @@ export default function Home() {
               While playing, press <kbd>Control</kbd>+<kbd>Option</kbd>+<kbd>Shift</kbd>+
               <kbd>Q</kbd> to return here.
             </p>
+
+            {isWeb && (
+              <a className="repo-link" href={REPO_URL} target="_blank" rel="noreferrer">
+                View on GitHub ↗
+              </a>
+            )}
           </div>
         </div>
       )}

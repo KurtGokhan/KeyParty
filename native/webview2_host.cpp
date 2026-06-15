@@ -48,10 +48,12 @@ using Microsoft::WRL::ComPtr;
 // App icon resource id — must match assets/icon.rc (embedded by build.zig).
 #define IDI_APPICON 1
 
-// Window size floor — matches the framework's default_frame (720x480 in
-// zero-native's WindowOptions). The window can grow but never shrink below this.
-static const LONG kMinWindowWidth = 720;
-static const LONG kMinWindowHeight = 480;
+// The menu window's size — also its minimum (it can grow but never shrink below
+// the menu/game layout). Kept equal to the macOS menu size in
+// native/appkit_host.m (ZeroNativeKeyPartyMenuWidth/Height) so both platforms
+// open the window at the same size.
+static const LONG kMenuWidth = 760;
+static const LONG kMenuHeight = 560;
 // Deep-purple window chrome matching the game stage (#0b0420). RGB() packs it
 // into a COLORREF (0x00BBGGRR) for both the title bar and the class background.
 static const COLORREF kFrameColor = RGB(0x0b, 0x04, 0x20);
@@ -105,8 +107,8 @@ struct Window {
     std::string title;
     double x = 0;
     double y = 0;
-    double width = 720;
-    double height = 480;
+    double width = kMenuWidth;
+    double height = kMenuHeight;
     // KeyParty: the main-window WebView2 (the upstream host never created one).
     // load_* params are stashed here until the controller finishes its async
     // creation, then applied in applyMainLoad().
@@ -773,8 +775,8 @@ static void exitKioskToMenu(Host *host) {
         if (r.right - r.left < 200 || r.bottom - r.top < 150) {
             int sw = GetSystemMetrics(SM_CXSCREEN);
             int sh = GetSystemMetrics(SM_CYSCREEN);
-            int width = (int)w.width > 0 ? (int)w.width : 720;
-            int height = (int)w.height > 0 ? (int)w.height : 480;
+            int width = (int)w.width > 0 ? (int)w.width : (int)kMenuWidth;
+            int height = (int)w.height > 0 ? (int)w.height : (int)kMenuHeight;
             r.left = (sw - width) / 2;
             r.top = (sh - height) / 2;
             r.right = r.left + width;
@@ -1163,8 +1165,8 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             // shrink below the game's layout. (Only our top-level window uses this
             // class; the WebView child is a STATIC, which never gets this message.)
             auto *mmi = reinterpret_cast<MINMAXINFO *>(lparam);
-            mmi->ptMinTrackSize.x = kMinWindowWidth;
-            mmi->ptMinTrackSize.y = kMinWindowHeight;
+            mmi->ptMinTrackSize.x = kMenuWidth;
+            mmi->ptMinTrackSize.y = kMenuHeight;
             return 0;
         }
         case WM_SIZE:
@@ -1320,8 +1322,13 @@ Host *zero_native_windows_create(const char *app_name, size_t app_name_len, cons
     window.title = host->window_title.empty() ? host->app_name : host->window_title;
     window.x = x;
     window.y = y;
-    window.width = width;
-    window.height = height;
+    // The main window always opens at the menu size — it goes full-screen for
+    // kiosk and returns to this size — matching macOS. Ignore the passed frame,
+    // which would otherwise vary by platform default or restored (kiosk) state.
+    (void)width;
+    (void)height;
+    window.width = kMenuWidth;
+    window.height = kMenuHeight;
     host->windows[window.id] = window;
     return host;
 }

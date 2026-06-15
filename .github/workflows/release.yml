@@ -82,13 +82,21 @@ jobs:
             -Doptimize=ReleaseFast \
             -Dpackage-target=macos
 
-      - name: Zip the .app bundle
+      - name: Build a .dmg (drag-to-Applications)
         run: |
           APP="$(ls -d zig-out/package/*.app | head -n1)"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "keyparty-${{ steps.ver.outputs.version }}-macos.zip"
+          # Stage the bundle under its display name with an Applications shortcut,
+          # so the mounted disk image is a familiar drag-to-install window.
+          STAGE="dmg-stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/Key Party.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Key Party" -srcfolder "$STAGE" -ov -format UDZO "keyparty-macos.dmg"
 
-      - name: Attach the binary to the release
-        run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-${{ steps.ver.outputs.version }}-macos.zip" --clobber
+      - name: Attach the .dmg to the release
+        # Version-less name -> https://github.com/<owner>/<repo>/releases/latest/download/keyparty-macos.dmg
+        # is a stable link the web build can point at.
+        run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-macos.dmg" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -156,10 +164,11 @@ jobs:
             -Dwebview2-include="$WV2_INC" \
             -Dwebview2-lib-dir="$WV2_LIB"
           test -f zig-out/bin/keyparty.exe || { echo "ERROR: no exe produced"; ls -R zig-out; exit 1; }
-          cp zig-out/bin/keyparty.exe "keyparty-${{ steps.ver.outputs.version }}-windows.exe"
+          # Version-less name -> .../releases/latest/download/keyparty-windows.exe is stable.
+          cp zig-out/bin/keyparty.exe "keyparty-windows.exe"
 
       - name: Attach the binary to the release
         shell: bash
-        run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-${{ steps.ver.outputs.version }}-windows.exe" --clobber
+        run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-windows.exe" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
