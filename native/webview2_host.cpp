@@ -619,10 +619,21 @@ static LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
         bool up = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
         if (p && (down || up)) {
             DWORD vk = p->vkCode;
-            bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-            bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-            bool meta = ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) != 0;
+
+            // We swallow every key (return 1 below), so the events that toggle
+            // the modifiers never reach the OS keyboard state — GetAsyncKeyState /
+            // GetKeyState would report Ctrl/Alt/Shift as up and the quit chord
+            // could never match. Track held keys from the events we actually see
+            // instead. (g_held_vks is cleared on enter/exit kiosk, so it can't
+            // carry stale modifiers.) The LL hook reports left/right-specific VKs.
+            bool repeat = down && g_held_vks.count(vk) != 0;
+            if (down) g_held_vks.insert(vk); else g_held_vks.erase(vk);
+
+            auto held = [](DWORD v) { return g_held_vks.count(v) != 0; };
+            bool ctrl = held(VK_LCONTROL) || held(VK_RCONTROL);
+            bool alt = held(VK_LMENU) || held(VK_RMENU);
+            bool shift = held(VK_LSHIFT) || held(VK_RSHIFT);
+            bool meta = held(VK_LWIN) || held(VK_RWIN);
 
             HWND hwnd = nullptr;
             auto it = g_kiosk_host->windows.find(1);
@@ -632,14 +643,6 @@ static LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
             if (down && ctrl && alt && shift && !meta && vk == 'Q') {
                 if (hwnd) PostMessageW(hwnd, WM_KEYPARTY_EXIT, 0, 0);
                 return 1;
-            }
-
-            bool repeat = false;
-            if (down) {
-                repeat = g_held_vks.count(vk) != 0;
-                g_held_vks.insert(vk);
-            } else {
-                g_held_vks.erase(vk);
             }
 
             if (hwnd) {
