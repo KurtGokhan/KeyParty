@@ -166,9 +166,17 @@ jobs:
           VER="${{ steps.ver.outputs.version }}"
           EXE=$(find zig-out/package -name '*.exe' | head -n1)
           if [ -z "$EXE" ]; then echo "no .exe produced"; ls -R zig-out/package; exit 1; fi
+          BIN_DIR=$(dirname "$EXE")            # <pkg>/bin
+          PKG_ROOT=$(dirname "$BIN_DIR")       # <pkg>  (also holds resources/dist)
           # The Evergreen loader is loaded dynamically at runtime, so it must sit
           # next to the exe in the package.
-          cp "$NUGET_DIR/build/native/x64/WebView2Loader.dll" "$(dirname "$EXE")/"
+          cp "$NUGET_DIR/build/native/x64/WebView2Loader.dll" "$BIN_DIR/"
+          # The host loads the frontend from <exe>/../resources/dist — fail loudly
+          # if packaging didn't bundle it, instead of shipping a blank window.
+          test -f "$PKG_ROOT/resources/dist/index.html" || {
+            echo "ERROR: frontend missing from package ($PKG_ROOT/resources/dist/index.html)";
+            ls -R "$PKG_ROOT"; exit 1;
+          }
           cd zig-out/package
           DIRS=$(ls -d */ 2>/dev/null || true)
           if [ -n "$DIRS" ]; then

@@ -795,6 +795,65 @@ Object.defineProperty(window,'keyparty',{value:Object.freeze({start:function(){p
 }
 
 #if ZERO_NATIVE_HAS_WEBVIEW2
+// The asset folder we last mapped, kept for the load-failure diagnostic below.
+static std::wstring g_main_asset_folder;
+
+static bool dirExists(const std::wstring &path) {
+    if (path.empty()) return false;
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// Directory holding keyparty.exe (absolute, no trailing slash).
+static std::wstring exeDir() {
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
+    std::wstring path(buf, n);
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+static bool isAbsolutePath(const std::wstring &p) {
+    if (p.size() >= 2 && p[1] == L':') return true;                  // C:\...
+    if (!p.empty() && (p[0] == L'\\' || p[0] == L'/')) return true;  // \\server or /...
+    return false;
+}
+
+// Collapse "..", make absolute (relative inputs resolve against the cwd).
+static std::wstring fullPath(const std::wstring &p) {
+    if (p.empty()) return p;
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetFullPathNameW(p.c_str(), MAX_PATH, buf, nullptr);
+    return (n == 0 || n >= MAX_PATH) ? p : std::wstring(buf, n);
+}
+
+// The runtime hands us the manifest's relative "dist" (frontend.dist). The
+// packager lays out the desktop artifact as <pkg>/bin/keyparty.exe alongside
+// <pkg>/resources/<dist>/index.html (tooling/package.zig), mirroring macOS's
+// Contents/MacOS + Contents/Resources. So resolve a relative root against the
+// executable's directory — preferring the packaged ../resources/<root> layout,
+// then a couple of dev fallbacks — and hand SetVirtualHostNameToFolderMapping a
+// real absolute folder. An absolute root is used as-is.
+static std::wstring resolveAssetRoot(const std::string &root_utf8) {
+    std::wstring root = widen(root_utf8);
+    if (isAbsolutePath(root)) return root;
+    const std::wstring dir = exeDir();
+    std::vector<std::wstring> candidates;
+    if (!dir.empty() && !root.empty()) {
+        candidates.push_back(fullPath(dir + L"\\..\\resources\\" + root)); // packaged
+        candidates.push_back(fullPath(dir + L"\\resources\\" + root));
+        candidates.push_back(fullPath(dir + L"\\" + root));                // beside exe
+    }
+    if (!root.empty()) candidates.push_back(fullPath(root));               // cwd (dev)
+    for (const auto &c : candidates) {
+        if (dirExists(c)) return c;
+    }
+    // None exist yet — return the packaged default so the diagnostic points at
+    // where the assets are expected to live.
+    return candidates.empty() ? root : candidates.front();
+}
+
 // Apply the stashed load request once the main WebView2 exists.
 static void applyMainLoad(Host *host, Window &w) {
     (void)host;
@@ -805,7 +864,8 @@ static void applyMainLoad(Host *host, Window &w) {
     } else if (w.load_kind == 2) {
         ComPtr<ICoreWebView2_3> wv3;
         if (SUCCEEDED(w.main_webview.As(&wv3)) && wv3) {
-            std::wstring folder = widen(w.asset_root);
+            std::wstring folder = resolveAssetRoot(w.asset_root);
+            g_main_asset_folder = folder;
             wv3->SetVirtualHostNameToFolderMapping(kAssetHost, folder.c_str(),
                                                    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
         }
@@ -971,12 +1031,18 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 if (!ok) {
                                     COREWEBVIEW2_WEB_ERROR_STATUS status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
                                     args->get_WebErrorStatus(&status);
-                                    MessageBoxW(nullptr,
-                                                (std::wstring(L"The page failed to load (web error status ") +
-                                                 std::to_wstring((int)status) +
-                                                 L"). The bundled frontend may be missing from the package, "
-                                                 L"so the asset folder mapping points at nothing.").c_str(),
-                                                L"KeyParty", MB_OK | MB_ICONWARNING);
+                                    std::wstring msg = L"The page failed to load (web error status ";
+                                    msg += std::to_wstring((int)status);
+                                    msg += L").";
+                                    if (!g_main_asset_folder.empty()) {
+                                        msg += L"\n\nExpected the bundled frontend at:\n";
+                                        msg += g_main_asset_folder;
+                                        if (!dirExists(g_main_asset_folder))
+                                            msg += L"\n\nThat folder does not exist — the package is "
+                                                   L"missing its resources\\dist directory.";
+                                    }
+                                    MessageBoxW(nullptr, msg.c_str(), L"KeyParty",
+                                                MB_OK | MB_ICONWARNING);
                                 }
                                 return S_OK;
                             }).Get(), &navc_token);

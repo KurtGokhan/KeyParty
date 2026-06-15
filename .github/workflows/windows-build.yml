@@ -80,14 +80,23 @@ jobs:
             -Dwebview2-include="$WV2_INC" \
             -Dwinrt-include="$WINRT"
 
-      - name: Bundle the WebView2 loader next to the exe
+      - name: Bundle the WebView2 loader and stage the package
         shell: bash
         run: |
           EXE=$(find zig-out/package -name '*.exe' | head -n1)
           if [ -z "$EXE" ]; then echo "no .exe produced"; ls -R zig-out/package; exit 1; fi
+          BIN_DIR=$(dirname "$EXE")            # <pkg>/bin
+          PKG_ROOT=$(dirname "$BIN_DIR")       # <pkg>  (also holds resources/dist)
           # Loaded dynamically at runtime, so it must sit next to keyparty.exe.
-          cp "$GITHUB_WORKSPACE/$NUGET_DIR/build/native/x64/WebView2Loader.dll" "$(dirname "$EXE")/"
-          echo "PKG_DIR=$(dirname "$EXE")" >> "$GITHUB_ENV"
+          cp "$GITHUB_WORKSPACE/$NUGET_DIR/build/native/x64/WebView2Loader.dll" "$BIN_DIR/"
+          # The host loads the frontend from <exe>/../resources/dist — fail loudly
+          # if packaging didn't bundle it, instead of shipping a blank window.
+          test -f "$PKG_ROOT/resources/dist/index.html" || {
+            echo "ERROR: frontend missing from package ($PKG_ROOT/resources/dist/index.html)";
+            ls -R "$PKG_ROOT"; exit 1;
+          }
+          # Upload the whole package (bin/ + resources/), not just the exe.
+          echo "PKG_DIR=$PKG_ROOT" >> "$GITHUB_ENV"
 
       - name: Upload the Windows build
         uses: actions/upload-artifact@v4
