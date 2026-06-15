@@ -1,7 +1,7 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "KeyParty",
+  title: "Key Party",
   description: "A key-smashing game for kids.",
 };
 

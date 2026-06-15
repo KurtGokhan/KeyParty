@@ -910,7 +910,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                     L"Could not load WebView2Loader.dll. It must sit next to keyparty.exe "
                     L"(it is bundled in the release .zip; a bare \"zig build run\" exe will "
                     L"not have it).",
-                    L"KeyParty", MB_OK | MB_ICONERROR);
+                    L"Key Party", MB_OK | MB_ICONERROR);
         return;
     }
     HWND hwnd = it->second.hwnd;
@@ -927,7 +927,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                             (std::wstring(L"WebView2 environment could not be created (") + hrHex(result) +
                              L").\nIs the WebView2 Runtime installed? It ships with Windows 11 and "
                              L"current Windows 10; otherwise install the Evergreen runtime.").c_str(),
-                            L"KeyParty", MB_OK | MB_ICONERROR);
+                            L"Key Party", MB_OK | MB_ICONERROR);
                 return result;
             }
             host->environment = environment;  // for CreateWebResourceResponse later
@@ -949,7 +949,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                         MessageBoxW(hwnd,
                                     (std::wstring(L"WebView2 controller could not be created (") +
                                      hrHex(controller_result) + L").").c_str(),
-                                    L"KeyParty", MB_OK | MB_ICONERROR);
+                                    L"Key Party", MB_OK | MB_ICONERROR);
                         return controller_result;
                     }
                     auto found = host->windows.find(window_id);
@@ -1055,7 +1055,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                            L"usually means the WebView2 runtime is missing or blocked "
                                            L"(it ships with Windows 11 and current Windows 10; otherwise "
                                            L"install the Evergreen runtime).";
-                                    MessageBoxW(nullptr, msg.c_str(), L"KeyParty",
+                                    MessageBoxW(nullptr, msg.c_str(), L"Key Party",
                                                 MB_OK | MB_ICONWARNING);
                                 }
                                 return S_OK;
@@ -1360,9 +1360,9 @@ void zero_native_windows_load_window_webview(Host *host, uint64_t window_id, con
     // This binary was compiled without WebView2 support, so there is no web view
     // to show — say so instead of leaving a silently blank window.
     MessageBoxW(w.hwnd,
-                L"KeyParty was built without WebView2 support (WebView2.h / wrl.h were "
+                L"Key Party was built without WebView2 support (WebView2.h / wrl.h were "
                 L"not found at compile time), so it can only show a blank window.",
-                L"KeyParty", MB_OK | MB_ICONERROR);
+                L"Key Party", MB_OK | MB_ICONERROR);
 #endif
     emit(host, w, kWindowFrame);
 }

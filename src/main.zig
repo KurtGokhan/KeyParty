@@ -30,8 +30,8 @@ const dev_origins = [_][]const u8{ "zero://app", "zero://inline", "http://127.0.
 pub fn main(init: std.process.Init) !void {
     var app = App{ .env_map = init.environ_map };
     try runner.runWithOptions(app.app(), .{
-        .app_name ="KeyParty",
-        .window_title ="KeyParty",
+        .app_name ="Key Party",
+        .window_title ="Key Party",
         .bundle_id ="dev.zero_native.keyparty",
         .icon_path = "assets/icon.icns",
         .security = .{

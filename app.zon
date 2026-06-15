@@ -1,7 +1,7 @@
 .{
     .id ="dev.zero_native.keyparty",
     .name ="keyparty",
-    .display_name ="KeyParty",
+    .display_name ="Key Party",
     .version = "0.1.0",
     .icons = .{ "assets/icon.icns" },
     .platforms = .{ "macos", "linux", "windows" },
@@ -27,6 +27,6 @@
     .web_engine = "system",
     .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
     .windows = .{
-        .{ .label = "main", .title ="KeyParty", .width = 720, .height = 480, .restore_state = true },
+        .{ .label = "main", .title ="Key Party", .width = 720, .height = 480, .restore_state = true },
     },
 }

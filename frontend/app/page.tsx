@@ -1225,9 +1225,9 @@ export default function Home() {
       </div>
 
       {mode === "menu" && (
-        <div className="menu" role="dialog" aria-modal="true" aria-label="KeyParty menu">
+        <div className="menu" role="dialog" aria-modal="true" aria-label="Key Party menu">
           <div className="menu-card">
-            <h1 className="menu-title">KeyParty</h1>
+            <h1 className="menu-title">Key Party</h1>
             <p className="menu-sub">A key-smashing party for little hands 🎹🌈🎉</p>
 
             <div className="menu-actions">
@@ -1252,7 +1252,7 @@ export default function Home() {
                 ) : (
                   <>
                     <span className="access-line">
-                      ⚠ KeyParty needs <strong>Accessibility</strong> permission so it can lock the
+                      ⚠ Key Party needs <strong>Accessibility</strong> permission so it can lock the
                       keyboard while playing — otherwise a child could press a system shortcut and
                       slip out of the game.
                     </span>
@@ -1260,7 +1260,7 @@ export default function Home() {
                       Grant Accessibility Access…
                     </button>
                     <span className="access-hint">
-                      Turn on “KeyParty” in System Settings → Privacy &amp; Security → Accessibility,
+                      Turn on “Key Party” in System Settings → Privacy &amp; Security → Accessibility,
                       then come back here. You can still Start without it.
                     </span>
                   </>
@@ -1271,7 +1271,7 @@ export default function Home() {
             {showWebNote && (
               <div className="web-note">
                 <span className="access-line">
-                  🌐 You’re playing in the browser. KeyParty works best as the desktop app —
+                  🌐 You’re playing in the browser. Key Party works best as the desktop app —
                   the browser can’t lock the keyboard, so a child can still press a shortcut and
                   slip out of the game.
                 </span>
