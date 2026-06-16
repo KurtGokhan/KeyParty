@@ -4,3 +4,6 @@ zig-out/
 
 # Root release tooling (Changesets) deps
 /node_modules/
+
+.DS_Store
+dist/
