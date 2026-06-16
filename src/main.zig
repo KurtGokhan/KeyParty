@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     try runner.runWithOptions(app.app(), .{
         .app_name ="Key Party",
         .window_title ="Key Party",
-        .bundle_id ="dev.zero_native.keyparty",
+        .bundle_id ="dev.keyparty.app",
         .icon_path = "assets/icon.icns",
         .security = .{
             .navigation = .{ .allowed_origins = &dev_origins },

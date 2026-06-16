@@ -1,5 +1,5 @@
 .{
-    .id ="dev.zero_native.keyparty",
+    .id ="dev.keyparty.app",
     .name ="keyparty",
     .display_name ="Key Party",
     .version = "0.1.0",
