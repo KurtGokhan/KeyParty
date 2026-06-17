@@ -224,10 +224,20 @@ export default function Home() {
     return () => root.classList.remove("kp-blurry", "kp-transparent");
   }, [backdrop]);
 
-  // Cycle solid → blurry → transparent → solid.
+  // Cycle solid → blurry → transparent → solid. On Windows the WebView2 compositor
+  // can't blur the desktop behind the transparent window (backdrop-filter has nothing
+  // to sample there), so "blurry" would look identical to "transparent" — skip it and
+  // cycle solid → transparent → solid. macOS keeps all three.
   const handleCycleBackdrop = () => {
     setBackdrop((m) => {
-      const next: BackdropMode = m === "solid" ? "blurry" : m === "blurry" ? "transparent" : "solid";
+      const next: BackdropMode =
+        m === "solid"
+          ? os === "windows"
+            ? "transparent"
+            : "blurry"
+          : m === "blurry"
+            ? "transparent"
+            : "solid";
       keyPartyBridge()?.setBackdrop?.(next);
       return next;
     });
