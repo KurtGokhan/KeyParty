@@ -54,18 +54,9 @@
 #include <d2d1.h>
 #include <dcomp.h>
 #include <windowsx.h>
-// CoreWebView2EnvironmentOptions (a WRL impl of ICoreWebView2EnvironmentOptions)
-// lets us pass Chromium browser switches at environment creation. It ships in the
-// same WebView2 SDK include dir as WebView2.h; guard the include so a stripped SDK
-// still builds (we just fall back to default options then).
-#if __has_include(<WebView2EnvironmentOptions.h>)
-#include <WebView2EnvironmentOptions.h>
-#define ZERO_NATIVE_HAS_WV2_ENV_OPTIONS 1
-#endif
 #define ZERO_NATIVE_HAS_WEBVIEW2 1
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
-using Microsoft::WRL::Make;
 #else
 #define ZERO_NATIVE_HAS_WEBVIEW2 0
 // Without these headers the host can only open a bare window with no web content
@@ -553,21 +544,6 @@ static bool kioskEnabled() {
     std::wstring v(buf, n);
     return v.empty() || v == L"0";
 }
-
-// Diagnostic switch (off by default): set KEYPARTY_DIAG=1 to pop a one-time message
-// box after the page loads reporting whether the native bridge is present and which
-// frontend bundle actually loaded — used to tell a bridge/timing problem from a
-// stale-cache / stale-frontend one.
-static bool diagEnabled() {
-    wchar_t buf[8] = {};
-    DWORD n = GetEnvironmentVariableW(L"KEYPARTY_DIAG", buf, 8);
-    if (n == 0) return false;
-    std::wstring v(buf, n);
-    return !v.empty() && v != L"0";
-}
-
-// One-shot guard so the KEYPARTY_DIAG message box fires only once per launch.
-static bool g_diag_shown = false;
 
 // Quote + escape a wide string as a JSON string token.
 static std::wstring jsonQuote(const std::wstring &s) {
@@ -1069,17 +1045,7 @@ static void applyMainLoad(Host *host, Window &w) {
                                                    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
         }
         std::wstring entry = widen(w.asset_entry.empty() ? std::string("index.html") : w.asset_entry);
-        // Cache-bust the top-level navigation with a per-launch token. WebView2 keeps
-        // a persistent disk cache under the user-data folder (shared across every
-        // build of this app the user has run); without this, a stale index.html from
-        // an earlier build can be served from cache — bypassing the new exe's embedded
-        // assets entirely, so native changes appear to have no effect. A unique query
-        // forces a cache miss → our WebResourceRequested handler serves the current
-        // blob. The handler strips the query before the asset lookup, and the fresh
-        // index.html references the current build's content-hashed chunks, so the
-        // whole app comes from the new binary. (Responses also carry no-store now.)
-        std::wstring sep = entry.find(L'?') == std::wstring::npos ? L"?" : L"&";
-        std::wstring url = std::wstring(kAssetBaseUrl) + entry + sep + L"_cb=" + std::to_wstring(GetTickCount64());
+        std::wstring url = std::wstring(kAssetBaseUrl) + entry;
         w.main_webview->Navigate(url.c_str());
     } else if (w.load_kind == 0) {
         std::wstring html = widen(w.load_source);
@@ -1108,28 +1074,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
     HWND hwnd = it->second.hwnd;
     std::weak_ptr<HostLifetime> lifetime = host->lifetime;
     const wchar_t *user_data = host->user_data_folder.empty() ? nullptr : host->user_data_folder.c_str();
-    // Disable WebView2's persistent HTTP disk cache. The whole frontend is served
-    // from the in-binary blob via WebResourceRequested, so the disk cache buys us
-    // nothing and actively hurts: it survives across builds under the user-data
-    // folder, and a cache HIT short-circuits WebResourceRequested entirely (our
-    // no-store header never gets a say). Stable-named subresources — e.g. the
-    // Next.js App Router RSC/hydration payloads (__next._full.txt), which are NOT
-    // covered by the index.html cache-bust — could then be served from an earlier
-    // build, so the page hydrated stale (old UI, missing the backdrop toggle) even
-    // though the new index.html and fresh content-hashed JS loaded. --disk-cache-
-    // size=1 makes Chromium hold ~nothing on disk: it evicts the existing poisoned
-    // entries on startup and never re-caches, so every request reaches our handler.
-    ComPtr<ICoreWebView2EnvironmentOptions> env_options;
-#ifdef ZERO_NATIVE_HAS_WV2_ENV_OPTIONS
-    {
-        auto opts = Make<CoreWebView2EnvironmentOptions>();
-        if (opts) {
-            opts->put_AdditionalBrowserArguments(L"--disk-cache-size=1");
-            opts.As(&env_options);
-        }
-    }
-#endif
-    factory(nullptr, user_data, env_options.Get(), Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+    factory(nullptr, user_data, nullptr, Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
         [host, window_id, hwnd, lifetime](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
             auto token = lifetime.lock();
             if (!token) return S_OK;
@@ -1308,21 +1253,6 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 // the deferred initial show doesn't flash the desktop.
                                 auto wi = host->windows.find(window_id);
                                 if (wi != host->windows.end()) showHostWindow(wi->second);
-                                // KEYPARTY_DIAG=1: one-time report of the live bridge +
-                                // loaded-bundle state, so we can tell a bridge/timing
-                                // problem from a stale-cache one without guessing.
-                                if (diagEnabled() && !g_diag_shown && wi != host->windows.end() && wi->second.main_webview) {
-                                    g_diag_shown = true;
-                                    HWND dhwnd = wi->second.hwnd;
-                                    wi->second.main_webview->ExecuteScript(
-                                        LR"JS("kp="+(typeof window.keyparty)+" setBackdrop="+(window.keyparty?(typeof window.keyparty.setBackdrop):"NO_KEYPARTY")+" zero="+(typeof window.zero)+" glassBtn="+(!!document.querySelector(".btn-glass"))+" readyState="+document.readyState+" scripts="+Array.from(document.scripts).map(function(s){return (s.src||"inline").split("/").pop();}).join(","))JS",
-                                        Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-                                            [dhwnd](HRESULT, LPCWSTR result) -> HRESULT {
-                                                MessageBoxW(dhwnd, result ? result : L"(null)",
-                                                            L"KeyParty bridge diagnostic", MB_OK);
-                                                return S_OK;
-                                            }).Get());
-                                }
                                 BOOL ok = TRUE;
                                 args->get_IsSuccess(&ok);
                                 if (!ok) {
@@ -1392,10 +1322,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 ComPtr<IStream> stream;
                                 stream.Attach(SHCreateMemStream(data, (UINT)len));
                                 if (!stream) return S_OK;
-                                // no-store: never let WebView2's persistent disk cache
-                                // hold our embedded assets, so each launch serves the
-                                // current binary's frontend (not a stale earlier build).
-                                std::wstring headers = L"Content-Type: " + widen(mime) + L"\r\nCache-Control: no-store\r\n";
+                                std::wstring headers = L"Content-Type: " + widen(mime) + L"\r\n";
                                 ComPtr<ICoreWebView2WebResourceResponse> response;
                                 if (SUCCEEDED(env->CreateWebResourceResponse(stream.Get(), 200, L"OK", headers.c_str(), &response)) && response) {
                                     args->put_Response(response.Get());
@@ -1405,19 +1332,15 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
 
                         // Inject the bridge + control scripts, and navigate ONLY once
                         // the second one is registered. AddScriptToExecuteOnDocument-
-                        // Created is asynchronous; the old code navigated immediately,
-                        // which races the registration. On Windows that race can leave
-                        // window.keyparty (and window.zero) absent for the first
-                        // document — the page's own scripts (React) then run before the
-                        // bridge exists, so feature-detection latched once at mount
-                        // (e.g. the backdrop toggle's canBackdrop = typeof
-                        // window.keyparty.setBackdrop === "function") misses it, even
-                        // though the bridge appears moments later (so Start still
-                        // works). Chaining navigation off the completion handler
-                        // guarantees both scripts run at document creation, before any
-                        // page script — matching macOS's WKUserScript document-start
-                        // guarantee. (Both scripts must register before navigating, so
-                        // the second is added inside the first's completion.)
+                        // Created is asynchronous; navigating immediately races the
+                        // registration, so on Windows the first document can load before
+                        // window.zero / window.keyparty exist — and any one-shot feature
+                        // detection the page runs at mount would then miss the bridge.
+                        // Chaining navigation off the completion handler guarantees both
+                        // scripts run at document creation, before any page script,
+                        // matching macOS's WKUserScript document-start guarantee. (Both
+                        // must register before navigating, so the second is added inside
+                        // the first's completion.)
                         w.main_webview->AddScriptToExecuteOnDocumentCreated(windowsBridgeScript(),
                             Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
                                 [host, window_id, lifetime](HRESULT, LPCWSTR) -> HRESULT {
