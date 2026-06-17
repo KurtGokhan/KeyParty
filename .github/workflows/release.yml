@@ -132,13 +132,22 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" \
             $(security list-keychains -d user | sed s/\"//g)
           rm -f "$RUNNER_TEMP/cert.p12"
-          # Fail loudly here (not later with codesign's cryptic "item could not be
-          # found in the keychain") if the .p12 carried no private key, and echo the
-          # exact identity name so MACOS_SIGN_IDENTITY can be matched against it.
-          echo "Code-signing identities now available:"
-          security find-identity -v -p codesigning "$KEYCHAIN"
-          if ! security find-identity -v -p codesigning "$KEYCHAIN" | grep -q '"'; then
-            echo "::error::No code-signing identity imported. Re-export the .p12 WITH its private key (see README → Code signing)."
+          # Diagnostics: list every imported identity (any policy) with its name —
+          # the name reveals the cert TYPE, which must be "Developer ID Application"
+          # (an Installer/Development cert won't satisfy the codesigning policy).
+          echo "=== All identities in the temp keychain ==="
+          security find-identity "$KEYCHAIN" || true
+          echo "=== Imported certificate (subject + validity window) ==="
+          security find-certificate -a -p "$KEYCHAIN" \
+            | openssl x509 -noout -subject -dates 2>/dev/null || true
+          # Gate on what codesign actually sees: a VALID codesigning identity on the
+          # full search list (temp keychain for the leaf+key, system keychain for the
+          # Apple intermediate/root the chain needs). Checking the temp keychain alone
+          # reports a false "0 valid" because the chain can't be built there.
+          echo "=== Valid code-signing identities on the search list (codesign's view) ==="
+          security find-identity -v -p codesigning
+          if [ "$(security find-identity -v -p codesigning | grep -c '"')" -eq 0 ]; then
+            echo "::error::No VALID code-signing identity. From the dump above, confirm the cert is a 'Developer ID Application' cert (not Installer/Development), is unexpired, and chains to Apple's intermediate. If the identity is listed but invalid, the Developer ID intermediate may be missing from the runner."
             exit 1
           fi
           # Hand the keychain path to the signing steps so they target it explicitly.
