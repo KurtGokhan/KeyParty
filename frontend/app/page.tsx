@@ -24,11 +24,17 @@ type Mode = "menu" | "playing";
 type AccessibilityStatus = { trusted: boolean; kioskEnabled: boolean };
 
 /** The window.keyparty shim the native shell injects (absent in a plain browser). */
+// macOS window background: "solid" = opaque chrome, "blurry" = desktop shows
+// through and is blurred in CSS, "transparent" = raw desktop shows through sharp.
+type BackdropMode = "solid" | "blurry" | "transparent";
+
 type KeyPartyBridge = {
   start?: () => void;
   quit?: () => void;
   requestAccessibility?: () => void;
   checkAccessibility?: () => void;
+  // macOS only: switch the window background between solid / clear / blurred.
+  setBackdrop?: (mode: BackdropMode) => void;
 };
 
 const keyPartyBridge = (): KeyPartyBridge | undefined =>
@@ -165,6 +171,8 @@ export default function Home() {
   const hintRef = useRef<HTMLDivElement>(null);
   const startRef = useRef<HTMLDivElement>(null);
   const counterRef = useRef<HTMLDivElement>(null);
+  // Holds the rare DOM "blur ripple" effects (canvas can't blur the desktop).
+  const fxRef = useRef<HTMLDivElement>(null);
 
   // "menu" shows the Start/Quit screen; "playing" runs the game. The game
   // effect reads modeRef (a ref, so it always sees the latest value without
@@ -177,6 +185,10 @@ export default function Home() {
   const [accessibility, setAccessibility] = useState<AccessibilityStatus | null>(null);
   // The visitor's desktop OS, so the browser build leads with the right download.
   const [os, setOs] = useState<DesktopOS | null>(null);
+  // Glass background: canBackdrop is true once the native shell exposes
+  // setBackdrop (macOS); `backdrop` is the live mode the menu toggle cycles.
+  const [canBackdrop, setCanBackdrop] = useState(false);
+  const [backdrop, setBackdrop] = useState<BackdropMode>("solid");
   // Imperative hooks into the game engine, published by the game effect.
   const engineRef = useRef<{ enterPlaying: () => void; returnToMenu: () => void } | null>(null);
 
@@ -192,6 +204,7 @@ export default function Home() {
     const native = typeof kp !== "undefined";
     setHasNative(native);
     setOs(detectOS());
+    setCanBackdrop(typeof kp?.setBackdrop === "function");
     if (!kp) return;
     kp.checkAccessibility?.();
     const id = window.setInterval(() => {
@@ -199,6 +212,26 @@ export default function Home() {
     }, 1500);
     return () => window.clearInterval(id);
   }, []);
+
+  // Mirror the background mode onto <html> so the CSS can react (see globals.css:
+  // kp-blurry / kp-transparent). It lives on the root element because <html>'s
+  // background propagates to the whole viewport — clearing only <body> would
+  // leave that root fill painting over the desktop.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("kp-blurry", backdrop === "blurry");
+    root.classList.toggle("kp-transparent", backdrop === "transparent");
+    return () => root.classList.remove("kp-blurry", "kp-transparent");
+  }, [backdrop]);
+
+  // Cycle solid → blurry → transparent → solid.
+  const handleCycleBackdrop = () => {
+    setBackdrop((m) => {
+      const next: BackdropMode = m === "solid" ? "blurry" : m === "blurry" ? "transparent" : "solid";
+      keyPartyBridge()?.setBackdrop?.(next);
+      return next;
+    });
+  };
 
   const handleStart = () => {
     // Switch the UI to the game immediately (responsive), then ask the native
@@ -392,6 +425,61 @@ export default function Home() {
         pop: 0,
       });
       if (glyphs.length > 20) glyphs.shift();
+    };
+
+    // True only when the window is non-opaque and the desktop is showing through
+    // (the kp-blurry / kp-transparent classes the menu toggle sets on <html>).
+    const seeThrough = () => {
+      const c = document.documentElement.classList;
+      return c.contains("kp-blurry") || c.contains("kp-transparent");
+    };
+
+    // A rare "blur shockwave": an expanding circle whose backdrop-filter blurs the
+    // desktop (and canvas) showing through within it, then fades. It has to be a
+    // DOM element — a <canvas> can only paint pixels, it can't blur what's behind
+    // the transparent web view. Self-removes when its animation ends.
+    //
+    // We grow the real width/height (NOT transform: scale) on purpose: WebKit
+    // applies backdrop-filter in the element's local space and then scales the
+    // result, so a scaled blur radius balloons with the scale factor. Sizing the
+    // box directly keeps blur(Npx) at N px on screen the whole time. And we fade
+    // through the blur radius rather than opacity, because WebKit drops the
+    // backdrop-filter entirely once opacity < 1.
+    const spawnBlurRipple = (x: number, y: number) => {
+      const layer = fxRef.current;
+      if (!layer) return;
+      const el = document.createElement("div");
+      el.className = "fx-blur-ripple";
+      layer.appendChild(el);
+
+      const maxD = Math.min(width, height) * 0.6; // final diameter
+      const peak = 10; // px — blur radius at its strongest (tunable)
+      const anim = el.animate(
+        [
+          {
+            width: "0px",
+            height: "0px",
+            left: `${x}px`,
+            top: `${y}px`,
+            backdropFilter: "blur(0px)",
+            // boxShadow: "inset 0 0 0 2px rgba(255,255,255,0.22)",
+          },
+          { backdropFilter: `blur(${peak}px)`, offset: 0.15 },
+          { backdropFilter: `blur(${peak}px)`, offset: 0.7 },
+          {
+            width: `${maxD}px`,
+            height: `${maxD}px`,
+            left: `${x - maxD / 2}px`,
+            top: `${y - maxD / 2}px`,
+            backdropFilter: "blur(0px)",
+            // boxShadow: "inset 0 0 0 2px rgba(255,255,255,0)",
+          },
+        ],
+        { duration: 850, easing: "cubic-bezier(0.22, 0.61, 0.36, 1)", fill: "both" },
+      );
+      const done = () => el.remove();
+      anim.onfinish = done;
+      anim.oncancel = done;
     };
 
     const tally = () => {
@@ -664,6 +752,13 @@ export default function Home() {
         }
       }
 
+      // Once in a while (only when the desktop shows through), a fresh press also
+      // sends out a blur shockwave. Rare, and never on key-repeat, so a held key
+      // doesn't machine-gun them. Chance is tunable.
+      if (!repeat && seeThrough() && Math.random() < 0.1) {
+        spawnBlurRipple(fx, fy);
+      }
+
       tally();
     };
 
@@ -801,15 +896,12 @@ export default function Home() {
     window.addEventListener("blur", onBlur);
     document.addEventListener("visibilitychange", onVisibility);
 
-    // Block pinch-zoom gestures, and the context menu while playing or in the
-    // native kiosk shell. But on the web build's menu screen (no native shell,
-    // not mid-game) let the normal browser right-click menu through.
+    // Block pinch-zoom gestures, and the context menu while playing (so a child
+    // can't right-click out of the game). On the menu screen — a grown-up screen,
+    // native shell or not — let the right-click menu through, which also exposes
+    // "Inspect Element" for debugging.
     const block = (e: Event) => {
-      if (
-        e.type === "contextmenu" &&
-        modeRef.current === "menu" &&
-        typeof keyPartyBridge() === "undefined"
-      ) {
+      if (e.type === "contextmenu" && modeRef.current === "menu") {
         return;
       }
       e.preventDefault();
@@ -1246,6 +1338,7 @@ export default function Home() {
 
   return (
     <div className={mode === "menu" ? "stage stage-menu" : "stage"}>
+      <div ref={fxRef} className="fx-layer" aria-hidden="true" />
       <canvas ref={canvasRef} />
       <div ref={counterRef} className="counter">0</div>
       <div ref={startRef} className="start">
@@ -1274,6 +1367,18 @@ export default function Home() {
                 </button>
               )}
             </div>
+
+            {/* macOS only: cycle the window background solid → blurry → transparent. */}
+            {canBackdrop && (
+              <button
+                type="button"
+                className="btn btn-glass"
+                aria-pressed={backdrop !== "solid"}
+                onClick={handleCycleBackdrop}
+              >
+                🪟 Background: {backdrop}
+              </button>
+            )}
 
             {showAccess && (
               <div className={`access ${accessibility?.trusted ? "ok" : "warn"}`}>

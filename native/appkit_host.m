@@ -155,6 +155,13 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @property(nonatomic, strong) ZeroNativeKeyPartyControlHandler *keyPartyControlHandler;
 @property(nonatomic, assign) BOOL kioskActive;
 @property(nonatomic, assign) NSRect windowedFrame;
+// KeyParty: optional see-through background, driven from the menu via
+// window.keyparty.setBackdrop(mode). Modes: "solid" (opaque deep-purple chrome),
+// "blurry" and "transparent" — both make the window non-opaque so the real
+// desktop shows through the (already transparent) web view. The blur in "blurry"
+// mode is done entirely in CSS (backdrop-filter on the desktop, filter on the
+// canvas — see frontend/app/globals.css), so the native side only flips opacity.
+@property(nonatomic, copy) NSString *backdropMode;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
@@ -207,6 +214,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)enterKiosk;
 - (void)exitKioskToMenu;
 - (void)handleKeyPartyControlCommand:(NSString *)command;
+- (void)applyBackdrop:(NSString *)mode;
 - (void)emitAccessibilityStatus;
 - (void)applyKioskPresentation;
 - (BOOL)installGlobalEventTap;
@@ -975,7 +983,8 @@ static NSString *ZeroNativeKeyPartyControlScript(void) {
         "start:function(){post('start');},"
         "quit:function(){post('quit');},"
         "requestAccessibility:function(){post('requestAccessibility');},"
-        "checkAccessibility:function(){post('checkAccessibility');}"
+        "checkAccessibility:function(){post('checkAccessibility');},"
+        "setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));}"
         "}),configurable:false});"
         "})();";
 }
@@ -1448,6 +1457,33 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         [self emitAccessibilityStatus];
     } else if ([command isEqualToString:@"checkAccessibility"]) {
         [self emitAccessibilityStatus];
+    } else if ([command hasPrefix:@"backdrop:"]) {
+        [self applyBackdrop:[command substringFromIndex:[@"backdrop:" length]]];
+    }
+}
+
+// KeyParty: switch the menu window's background between three modes.
+//   "solid"       — opaque deep-purple chrome (the default).
+//   "blurry"      — non-opaque window; the web layer blurs the desktop in CSS.
+//   "transparent" — non-opaque window; the raw desktop shows through, sharp.
+// The only native difference is window opacity. The web UI handles the rest via
+// the kp-blurry / kp-transparent classes (see globals.css): for both it drops the
+// opaque page fills so the desktop shows, and for "blurry" it adds the CSS blur.
+- (void)applyBackdrop:(NSString *)mode {
+    if (mode.length == 0) mode = @"solid";
+    if ([self.backdropMode isEqualToString:mode]) return;
+    self.backdropMode = mode;
+
+    NSWindow *window = self.window;
+    if (!window) return;
+
+    if ([mode isEqualToString:@"solid"]) {
+        window.opaque = YES;
+        // Restore the deep-purple chrome (matches -createWindowWithId:).
+        window.backgroundColor = [NSColor colorWithSRGBRed:11.0 / 255.0 green:4.0 / 255.0 blue:32.0 / 255.0 alpha:1.0];
+    } else {
+        window.opaque = NO;
+        window.backgroundColor = [NSColor clearColor];
     }
 }
 
@@ -1478,6 +1514,15 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 
     NSScreen *screen = window.screen ?: [NSScreen mainScreen];
     NSRect rect = screen ? screen.frame : window.frame;
+    if (screen) {
+        // Overshoot every screen edge so nothing peeks out from under the kiosk
+        // window — in particular the ~1px menu-bar reveal strip at the very top
+        // that stays clickable when the window stops exactly at screen.frame. The
+        // shield window level already sits above the menu bar, and
+        // -constrainFrameRect: keeps AppKit from clamping this back inside the
+        // visible frame.
+        rect = NSInsetRect(rect, -2.0, -2.0);
+    }
     self.kioskActive = YES; // gate -applyKioskPresentation before calling it
 
     // Borderless + shield level so the window covers the ENTIRE screen, menu bar

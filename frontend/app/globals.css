@@ -47,6 +47,30 @@ canvas {
   height: 100%;
 }
 
+/* Overlay for the rare "blur ripple" effects. It sits below so a ripple blurs the desktop.
+   Only populated in see-through modes — see spawnBlurRipple in page.tsx. */
+.fx-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* A single expanding blur shockwave. backdrop-filter blurs whatever shows through
+   behind it (the desktop, since the window is non-opaque); the rim gives the wave
+   front some definition. JS scales and fades it, then removes it. */
+.fx-blur-ripple {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  will-change: backdrop-filter;
+  /* size, backdrop-filter and box-shadow are all driven by the JS animation
+     (fill: both) in spawnBlurRipple — see page.tsx. */
+  /* backdrop-filter: blur(1px) !important; */
+  /* box-shadow:
+    inset 0 0 0 2px rgba(255, 255, 255, 0.18),
+    0 0 24px rgba(255, 255, 255, 0.06); */
+}
+
 /* Big "smash any key" prompt shown until the first key. */
 .start {
   position: absolute;
@@ -242,6 +266,69 @@ canvas {
   color: #06121f;
   box-shadow: 0 10px 30px rgba(95, 184, 255, 0.4);
   font-size: clamp(0.95rem, 2.2vw, 1.15rem);
+}
+
+.btn-glass {
+  margin-top: 14px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  font-size: clamp(0.9rem, 2vw, 1.1rem);
+}
+
+.btn-glass[aria-pressed="true"] {
+  background: rgba(95, 184, 255, 0.22);
+  border-color: rgba(95, 184, 255, 0.55);
+}
+
+/* KeyParty: see-through background modes. The native shell (see -applyBackdrop:
+   in native/appkit_host.m) makes the window non-opaque for both "blurry" and
+   "transparent", so here we drop every opaque fill — including the root
+   <html>/<body> background, which propagates to the whole viewport — and let the
+   real desktop show through. The class lives on <html> for that reason. The menu
+   card keeps a lighter tint so it stays readable over the desktop. */
+html.kp-blurry,
+html.kp-blurry body,
+html.kp-transparent,
+html.kp-transparent body {
+  background: transparent !important;
+}
+
+/* Not *fully* transparent: a barely-there tint on the full-viewport stage. A
+   transparent web view composites its alpha-0 regions as transparent BLACK, so
+   WebKit darkens every anti-aliased edge against that black — the contour you see
+   on all elements. A tiny non-zero alpha floor removes the alpha-0 holes, so
+   there's nothing black to fringe against, at the cost of an imperceptible dim
+   over the desktop. Tune the alpha (or the tint) to taste. */
+html.kp-blurry .stage,
+html.kp-transparent .stage {
+  background: rgba(11, 4, 32, 0.06) !important;
+}
+
+html.kp-blurry .menu,
+html.kp-transparent .menu {
+  background: transparent;
+}
+
+html.kp-blurry .menu-card,
+html.kp-transparent .menu-card {
+  background: rgba(18, 8, 40, 0.5);
+}
+
+/* "transparent" = the raw desktop, sharp. Kill the UI's own backdrop blurs
+   (.menu, .hint) so nothing softens the desktop showing through behind them. */
+html.kp-transparent .menu,
+html.kp-transparent .hint {
+  backdrop-filter: none;
+}
+
+/* "blurry" = blur done entirely in CSS, no native vibrancy. backdrop-filter on
+   the stage blurs the desktop showing through the transparent window; filter on
+   the canvas blurs the key-press effects painted on it. Both radii are yours to
+   tune. (backdrop-filter samples the desktop here because the window is
+   non-opaque and the page is transparent — WebKit composites against it.) */
+html.kp-blurry .stage {
+  backdrop-filter: blur(3px) saturate(150%);
 }
 
 .access {
