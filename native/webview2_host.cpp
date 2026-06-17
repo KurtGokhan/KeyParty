@@ -1017,6 +1017,16 @@ static bool setupComposition(Host *host, Window &w) {
     return true;
 }
 
+// Close a composition controller on an early-bail path. ICoreWebView2Composition-
+// Controller has no Close() — that lives on the sibling ICoreWebView2Controller the
+// same object implements — so QI across to it to shut the WebView2 down.
+static void closeCompositionController(ICoreWebView2CompositionController *cc) {
+    if (!cc) return;
+    ComPtr<ICoreWebView2CompositionController> comp(cc);
+    ComPtr<ICoreWebView2Controller> controller;
+    if (SUCCEEDED(comp.As(&controller)) && controller) controller->Close();
+}
+
 // Apply the stashed load request once the main WebView2 exists.
 static void applyMainLoad(Host *host, Window &w) {
     (void)host;
@@ -1101,12 +1111,12 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                 [host, window_id, hwnd, lifetime](HRESULT controller_result, ICoreWebView2CompositionController *composition_controller) -> HRESULT {
                     auto token = lifetime.lock();
                     if (!token) {
-                        if (composition_controller) composition_controller->Close();
+                        closeCompositionController(composition_controller);
                         return S_OK;
                     }
                     std::lock_guard<std::recursive_mutex> guard(token->mutex);
                     if (!token->alive) {
-                        if (composition_controller) composition_controller->Close();
+                        closeCompositionController(composition_controller);
                         return S_OK;
                     }
                     if (FAILED(controller_result) || !composition_controller) {
@@ -1121,7 +1131,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                     ComPtr<ICoreWebView2CompositionController> comp_controller(composition_controller);
                     ComPtr<ICoreWebView2Controller> controller;
                     if (FAILED(comp_controller.As(&controller)) || !controller) {
-                        composition_controller->Close();
+                        closeCompositionController(composition_controller);
                         return E_NOINTERFACE;
                     }
                     auto found = host->windows.find(window_id);
