@@ -85,7 +85,9 @@ jobs:
         run: |
           VER=$(echo '${{ needs.release.outputs.publishedPackages }}' | jq -r '.[0].version')
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "tag=keyparty@$VER" >> "$GITHUB_OUTPUT"
+          # Changesets tags a single-package repo as v<version> (only monorepos
+          # use <name>@<version>), so the release we upload assets to is "v$VER".
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
 
       - name: Build & package the macOS app
         env:
@@ -114,12 +116,24 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" \
             $(security list-keychains -d user | sed s/\"//g)
           rm -f "$RUNNER_TEMP/cert.p12"
+          # Fail loudly here (not later with codesign's cryptic "item could not be
+          # found in the keychain") if the .p12 carried no private key, and echo the
+          # exact identity name so MACOS_SIGN_IDENTITY can be matched against it.
+          echo "Code-signing identities now available:"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+          if ! security find-identity -v -p codesigning "$KEYCHAIN" | grep -q '"'; then
+            echo "::error::No code-signing identity imported. Re-export the .p12 WITH its private key (see README → Code signing)."
+            exit 1
+          fi
+          # Hand the keychain path to the signing steps so they target it explicitly.
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
 
       - name: Sign the app (Developer ID + Hardened Runtime)
         if: ${{ env.MACOS_CERTIFICATE != '' }}
         run: |
           APP="$(ls -d zig-out/package/*.app | head -n1)"
           codesign --force --deep --options runtime --timestamp \
+            --keychain "$KEYCHAIN" \
             --entitlements assets/keyparty.entitlements \
             --sign "$MACOS_SIGN_IDENTITY" "$APP"
           codesign --verify --strict --verbose=2 "$APP"
@@ -138,7 +152,8 @@ jobs:
       - name: Sign & notarize the .dmg
         if: ${{ env.MACOS_CERTIFICATE != '' }}
         run: |
-          codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "keyparty-macos.dmg"
+          codesign --force --timestamp --keychain "$KEYCHAIN" \
+            --sign "$MACOS_SIGN_IDENTITY" "keyparty-macos.dmg"
           if [ -n "$APPLE_NOTARY_KEY" ]; then
             echo "$APPLE_NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
             # --wait blocks until Apple finishes; staple embeds the ticket so the
@@ -205,7 +220,9 @@ jobs:
         run: |
           VER=$(echo '${{ needs.release.outputs.publishedPackages }}' | jq -r '.[0].version')
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "tag=keyparty@$VER" >> "$GITHUB_OUTPUT"
+          # Changesets tags a single-package repo as v<version> (only monorepos
+          # use <name>@<version>), so the release we upload assets to is "v$VER".
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
 
       - name: Build the single-file Windows exe
         shell: bash
