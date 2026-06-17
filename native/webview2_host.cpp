@@ -1177,9 +1177,12 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 settings3->put_AreBrowserAcceleratorKeysEnabled(FALSE);
                             }
                         }
-                        w.main_webview->AddScriptToExecuteOnDocumentCreated(windowsBridgeScript(), nullptr);
-                        w.main_webview->AddScriptToExecuteOnDocumentCreated(keyPartyControlScript(), nullptr);
-
+                        // Register both document-created scripts, then navigate only
+                        // after the SECOND is registered (chained off its completion
+                        // handler below — see the navigation note). The bridge script
+                        // defines window.zero; the control script defines
+                        // window.keyparty (start/quit/setBackdrop/…). Their order
+                        // doesn't matter; both must run before any page script.
                         EventRegistrationToken message_token = {};
                         w.main_webview->add_WebMessageReceived(Callback<ICoreWebView2WebMessageReceivedEventHandler>(
                             [host, window_id, lifetime](ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventArgs *args) -> HRESULT {
@@ -1326,8 +1329,45 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 }
                                 return S_OK;
                             }).Get(), &wrr_token);
+
+                        // Inject the bridge + control scripts, and navigate ONLY once
+                        // the second one is registered. AddScriptToExecuteOnDocument-
+                        // Created is asynchronous; the old code navigated immediately,
+                        // which races the registration. On Windows that race can leave
+                        // window.keyparty (and window.zero) absent for the first
+                        // document — the page's own scripts (React) then run before the
+                        // bridge exists, so feature-detection latched once at mount
+                        // (e.g. the backdrop toggle's canBackdrop = typeof
+                        // window.keyparty.setBackdrop === "function") misses it, even
+                        // though the bridge appears moments later (so Start still
+                        // works). Chaining navigation off the completion handler
+                        // guarantees both scripts run at document creation, before any
+                        // page script — matching macOS's WKUserScript document-start
+                        // guarantee. (Both scripts must register before navigating, so
+                        // the second is added inside the first's completion.)
+                        w.main_webview->AddScriptToExecuteOnDocumentCreated(windowsBridgeScript(),
+                            Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
+                                [host, window_id, lifetime](HRESULT, LPCWSTR) -> HRESULT {
+                                    auto token = lifetime.lock();
+                                    if (!token) return S_OK;
+                                    std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                                    if (!token->alive) return S_OK;
+                                    auto wi = host->windows.find(window_id);
+                                    if (wi == host->windows.end() || !wi->second.main_webview) return S_OK;
+                                    wi->second.main_webview->AddScriptToExecuteOnDocumentCreated(keyPartyControlScript(),
+                                        Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
+                                            [host, window_id, lifetime](HRESULT, LPCWSTR) -> HRESULT {
+                                                auto token = lifetime.lock();
+                                                if (!token) return S_OK;
+                                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                                                if (!token->alive) return S_OK;
+                                                auto wi = host->windows.find(window_id);
+                                                if (wi != host->windows.end()) applyMainLoad(host, wi->second);
+                                                return S_OK;
+                                            }).Get());
+                                    return S_OK;
+                                }).Get());
                     }
-                    applyMainLoad(host, w);
                     return S_OK;
                 }).Get());
         }).Get());
