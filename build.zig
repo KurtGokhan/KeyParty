@@ -418,7 +418,17 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
 // resources/ folder — the exe is fully self-contained.
 fn addWindowsAssetEmbed(b: *std.Build, app_mod: *std.Build.Module, frontend_build: *std.Build.Step.Run) void {
     const gen = b.addSystemCommand(&.{ "node", "scripts/embed-assets.mjs" });
-    gen.addArg(b.pathFromRoot("frontend/out"));
+    // Pass frontend/out as a *tracked directory* input, not a bare path string.
+    // This Run step produces an output file, so Zig caches it keyed on its inputs —
+    // and addDirectoryArg hashes the directory's CONTENTS into that key. With a
+    // plain addArg(path) the key was just the (constant) argv, so Zig happily reused
+    // a previously generated keyparty_assets.c whenever the args matched, embedding a
+    // STALE frontend even though npm had just rebuilt frontend/out. (dependOn only
+    // orders the steps; it does not feed contents into the cache key.) That cached
+    // C survives across CI runs too, since mlugg/setup-zig caches the Zig cache —
+    // which is why fresh source kept shipping an old embedded UI. Tracking the dir
+    // makes a frontend change a cache miss, so the embed is regenerated.
+    gen.addDirectoryArg(b.path("frontend/out"));
     const gen_c = gen.addOutputFileArg("keyparty_assets.c");
     gen.step.dependOn(&frontend_build.step); // needs the built frontend on disk
 
