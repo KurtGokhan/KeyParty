@@ -394,6 +394,10 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkSystemLibrary("dwmapi", .{});
         // CreateSolidBrush — dark window-class background (native/webview2_host.cpp).
         app_mod.linkSystemLibrary("gdi32", .{});
+        // DCompositionCreateDevice — composition (visual) hosting that lets the
+        // WebView2 render transparently for the see-through backdrop modes
+        // (native/webview2_host.cpp).
+        app_mod.linkSystemLibrary("dcomp", .{});
     }
 }
 

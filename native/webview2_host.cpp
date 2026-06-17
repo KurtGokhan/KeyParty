@@ -1,3 +1,11 @@
+// Composition hosting (DirectComposition + WS_EX_NOREDIRECTIONBITMAP) needs the
+// Windows 8+ API surface, which the SDK headers gate behind _WIN32_WINNT. Target
+// Windows 10 (the WebView2 Evergreen runtime already requires Win10+) so those
+// declarations are visible. Guarded so a build-system-provided value still wins.
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+
 #include <windows.h>
 #include <shellapi.h>
 #include <objbase.h>
@@ -34,6 +42,15 @@
 #if __has_include(<WebView2.h>) && __has_include(<wrl.h>)
 #include <WebView2.h>
 #include <wrl.h>
+// Composition (visual) hosting: the WebView2 renders into a DirectComposition
+// visual we own instead of a windowed child HWND. That is the only way to get a
+// transparent WebView2 (the see-through backdrop modes). <dxgi1_2.h> declares
+// IDXGIDevice (a DCompositionCreateDevice parameter type); <dcomp.h> is the DComp
+// API; <windowsx.h> has the GET_X_LPARAM/GET_Y_LPARAM helpers used by the input
+// forwarding that composition hosting requires (windowed mode routed input for us).
+#include <dxgi1_2.h>
+#include <dcomp.h>
+#include <windowsx.h>
 #define ZERO_NATIVE_HAS_WEBVIEW2 1
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
@@ -123,9 +140,17 @@ struct Window {
     LONG_PTR saved_exstyle = 0;
     RECT saved_rect = {};
     bool kiosk_active = false;
+    // The main window is created hidden and revealed once its WebView2 first paints
+    // (a composition window has no opaque surface, so showing one empty would flash
+    // the desktop through it). See showHostWindow.
+    bool shown = false;
 #if ZERO_NATIVE_HAS_WEBVIEW2
     ComPtr<ICoreWebView2Controller> main_controller;
+    ComPtr<ICoreWebView2CompositionController> main_composition_controller;
     ComPtr<ICoreWebView2> main_webview;
+    // DirectComposition target + root visual that hosts the WebView2's own visual.
+    ComPtr<IDCompositionTarget> dcomp_target;
+    ComPtr<IDCompositionVisual> dcomp_root_visual;
 #endif
 };
 
@@ -175,10 +200,19 @@ struct Host {
     // KeyParty: per-process WebView2 user-data folder + kiosk lock state.
     std::wstring user_data_folder;
     bool kiosk_active = false;
+    // KeyParty: current see-through background mode (window.keyparty.setBackdrop):
+    // "solid" (opaque deep-purple chrome, the default), "blurry"/"transparent" (the
+    // window is non-opaque so the desktop shows through the transparent web view; the
+    // blur in "blurry" is done entirely in CSS). Persisted so kiosk enter/exit and
+    // resizes keep it. Mirrors backdropMode in native/appkit_host.m.
+    std::wstring backdrop_mode = L"solid";
 #if ZERO_NATIVE_HAS_WEBVIEW2
     // Kept alive so the WebResourceRequested handler can build responses
     // (CreateWebResourceResponse lives on the environment).
     ComPtr<ICoreWebView2Environment> environment;
+    // DirectComposition device shared by all composition-hosted windows; the
+    // per-window target + root visual live on the Window struct.
+    ComPtr<IDCompositionDevice> dcomp_device;
 #endif
 };
 
@@ -451,6 +485,20 @@ static void applyChildWebViewLayer(Host *host, uint64_t window_id, const std::st
 
 static Host *hostFromWindow(HWND hwnd) {
     return reinterpret_cast<Host *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+}
+
+// Reveal a host window the first time it has something to show. The main window is
+// created hidden because a composition-hosted, redirection-less window shows the
+// desktop through any not-yet-painted area — revealing it before the WebView2 has
+// rendered would flash the desktop even in solid mode. Called on first paint and on
+// every WebView2 init-failure path so the window is never left invisible.
+static void showHostWindow(Window &w) {
+    if (!w.hwnd || w.shown) return;
+    w.shown = true;
+    ShowWindow(w.hwnd, SW_SHOW);
+    UpdateWindow(w.hwnd);
+    SetForegroundWindow(w.hwnd);
+    SetFocus(w.hwnd);
 }
 
 /* ===================================================================== *
@@ -727,8 +775,16 @@ static void enterKiosk(Host *host) {
     if (GetMonitorInfoW(mon, &mi)) screen = mi.rcMonitor;
 
     // Borderless + topmost, covering the whole monitor (taskbar included).
+    LONG_PTR kiosk_exstyle = WS_EX_TOPMOST;
+#if ZERO_NATIVE_HAS_WEBVIEW2
+    // Keep the no-redirection-bitmap style so the kiosk window stays
+    // composition-backed and the see-through backdrop modes keep working
+    // full-screen. (It is a creation-time style, so this mainly keeps the bit
+    // consistent for DWM and future reads of the exstyle.)
+    kiosk_exstyle |= WS_EX_NOREDIRECTIONBITMAP;
+#endif
     SetWindowLongPtrW(w.hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-    SetWindowLongPtrW(w.hwnd, GWL_EXSTYLE, WS_EX_TOPMOST);
+    SetWindowLongPtrW(w.hwnd, GWL_EXSTYLE, kiosk_exstyle);
     SetWindowPos(w.hwnd, HWND_TOPMOST, screen.left, screen.top,
                  screen.right - screen.left, screen.bottom - screen.top,
                  SWP_FRAMECHANGED | SWP_SHOWWINDOW);
@@ -797,6 +853,43 @@ static void exitKioskToMenu(Host *host) {
     emitMainEvent(host, L"keyparty:menu", L"{}");
 }
 
+#if ZERO_NATIVE_HAS_WEBVIEW2
+// The WebView2 default background color for a backdrop mode. "solid" → opaque
+// deep-purple chrome (the same #0b0420 as the GDI frame color and the macOS solid
+// window). "blurry"/"transparent" → fully transparent so the desktop shows through
+// the web view; the web layer (kp-blurry/kp-transparent CSS) does the rest. Mirrors
+// -applyBackdrop: in native/appkit_host.m, where the only native change is opacity.
+static COREWEBVIEW2_COLOR backdropColor(const std::wstring &mode) {
+    if (mode == L"blurry" || mode == L"transparent") {
+        return COREWEBVIEW2_COLOR{0, 0, 0, 0};
+    }
+    return COREWEBVIEW2_COLOR{255, 0x0b, 0x04, 0x20};  // {A, R, G, B}
+}
+#endif
+
+// KeyParty: switch the main window's background between solid / blurry / transparent.
+// The only native difference is the WebView2 default background color (opaque vs
+// fully transparent); the web UI does the visuals (globals.css kp-blurry /
+// kp-transparent). The mode is persisted on the host so it survives kiosk enter/exit
+// and resizes, and is (re)applied whenever the controller is created. Mirror of
+// -applyBackdrop: in native/appkit_host.m.
+static void applyBackdrop(Host *host, const std::wstring &mode_in) {
+    if (!host) return;
+    std::wstring mode = mode_in.empty() ? L"solid" : mode_in;
+    if (host->backdrop_mode == mode) return;  // no-op (mirrors the macOS early-out)
+    host->backdrop_mode = mode;
+#if ZERO_NATIVE_HAS_WEBVIEW2
+    auto it = host->windows.find(1);
+    // If the controller doesn't exist yet, the new mode is stored above and applied
+    // at controller creation from host->backdrop_mode.
+    if (it == host->windows.end() || !it->second.main_controller) return;
+    ComPtr<ICoreWebView2Controller2> controller2;
+    if (SUCCEEDED(it->second.main_controller.As(&controller2)) && controller2) {
+        controller2->put_DefaultBackgroundColor(backdropColor(mode));
+    }
+#endif
+}
+
 // JS -> native control commands from window.keyparty.* .
 static void handleControlCommand(Host *host, const std::wstring &cmd) {
     if (!host) return;
@@ -809,6 +902,8 @@ static void handleControlCommand(Host *host, const std::wstring &cmd) {
         emitAccessibilityStatus(host);  // no OS permission needed on Windows
     } else if (cmd == L"checkAccessibility") {
         emitAccessibilityStatus(host);
+    } else if (cmd.rfind(L"backdrop:", 0) == 0) {
+        applyBackdrop(host, cmd.substr(9));  // wcslen(L"backdrop:") == 9
     }
 }
 
@@ -832,7 +927,7 @@ static const wchar_t *keyPartyControlScript() {
     return LR"JS((function(){
 if(window.keyparty){return;}
 function post(cmd){try{if(window.chrome&&window.chrome.webview&&window.chrome.webview.postMessage){window.chrome.webview.postMessage(cmd);}}catch(e){}}
-Object.defineProperty(window,'keyparty',{value:Object.freeze({start:function(){post('start');},quit:function(){post('quit');},requestAccessibility:function(){post('requestAccessibility');},checkAccessibility:function(){post('checkAccessibility');}}),configurable:false});
+Object.defineProperty(window,'keyparty',{value:Object.freeze({start:function(){post('start');},quit:function(){post('quit');},requestAccessibility:function(){post('requestAccessibility');},checkAccessibility:function(){post('checkAccessibility');},setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));}}),configurable:false});
 })();)JS";
 }
 
@@ -891,6 +986,31 @@ static std::wstring resolveAssetRoot(const std::string &root_utf8) {
     // None exist yet — return the packaged default so the diagnostic points at
     // where the assets are expected to live.
     return candidates.empty() ? root : candidates.front();
+}
+
+// Stand up this window's DirectComposition target + root visual. The WebView2's own
+// visual is attached under the root later (put_RootVisualTarget, in the controller
+// callback). The device is created once and shared across windows. DirectComposition
+// is available on every OS that can run the WebView2 runtime, so this is expected to
+// succeed; on the rare failure the window simply won't render (no transparency).
+static bool setupComposition(Host *host, Window &w) {
+    if (!host || !w.hwnd) return false;
+    if (!host->dcomp_device) {
+        if (FAILED(DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&host->dcomp_device))) ||
+            !host->dcomp_device) {
+            return false;
+        }
+    }
+    if (FAILED(host->dcomp_device->CreateTargetForHwnd(w.hwnd, TRUE, &w.dcomp_target)) ||
+        !w.dcomp_target) {
+        return false;
+    }
+    if (FAILED(host->dcomp_device->CreateVisual(&w.dcomp_root_visual)) || !w.dcomp_root_visual) {
+        return false;
+    }
+    w.dcomp_target->SetRoot(w.dcomp_root_visual.Get());
+    host->dcomp_device->Commit();
+    return true;
 }
 
 // Apply the stashed load request once the main WebView2 exists.
@@ -957,24 +1077,47 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
             host->environment = environment;  // for CreateWebResourceResponse later
             auto found = host->windows.find(window_id);
             if (found == host->windows.end() || found->second.hwnd != hwnd || !IsWindow(hwnd)) return S_OK;
-            return environment->CreateCoreWebView2Controller(hwnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                [host, window_id, hwnd, lifetime](HRESULT controller_result, ICoreWebView2Controller *controller) -> HRESULT {
+            ComPtr<ICoreWebView2Environment3> environment3;
+            if (FAILED(environment->QueryInterface(IID_PPV_ARGS(&environment3))) || !environment3) {
+                MessageBoxW(hwnd,
+                            L"This WebView2 runtime is too old for composition (visual) hosting "
+                            L"(ICoreWebView2Environment3 is unavailable). Update the WebView2 "
+                            L"Evergreen runtime.",
+                            L"Key Party", MB_OK | MB_ICONERROR);
+                showHostWindow(found->second);
+                return E_NOINTERFACE;
+            }
+            // Composition (visual) hosting — NOT windowed. Windowed WebView2 renders
+            // into an opaque child surface that can't be made transparent; the
+            // composition controller renders into a DirectComposition visual we own,
+            // which can. Input is no longer auto-routed (windowed mode did that for
+            // free), so the host WndProc forwards mouse input via SendMouseInput and
+            // hands the web view keyboard focus via MoveFocus.
+            return environment3->CreateCoreWebView2CompositionController(hwnd, Callback<ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>(
+                [host, window_id, hwnd, lifetime](HRESULT controller_result, ICoreWebView2CompositionController *composition_controller) -> HRESULT {
                     auto token = lifetime.lock();
                     if (!token) {
-                        if (controller) controller->Close();
+                        if (composition_controller) composition_controller->Close();
                         return S_OK;
                     }
                     std::lock_guard<std::recursive_mutex> guard(token->mutex);
                     if (!token->alive) {
-                        if (controller) controller->Close();
+                        if (composition_controller) composition_controller->Close();
                         return S_OK;
                     }
-                    if (FAILED(controller_result) || !controller) {
+                    if (FAILED(controller_result) || !composition_controller) {
                         MessageBoxW(hwnd,
-                                    (std::wstring(L"WebView2 controller could not be created (") +
+                                    (std::wstring(L"WebView2 composition controller could not be created (") +
                                      hrHex(controller_result) + L").").c_str(),
                                     L"Key Party", MB_OK | MB_ICONERROR);
+                        auto wfail = host->windows.find(window_id);
+                        if (wfail != host->windows.end()) showHostWindow(wfail->second);
                         return controller_result;
+                    }
+                    ComPtr<ICoreWebView2Controller> controller;
+                    if (FAILED(composition_controller->QueryInterface(IID_PPV_ARGS(&controller))) || !controller) {
+                        composition_controller->Close();
+                        return E_NOINTERFACE;
                     }
                     auto found = host->windows.find(window_id);
                     if (found == host->windows.end() || found->second.hwnd != hwnd) {
@@ -982,12 +1125,30 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                         return S_OK;
                     }
                     Window &w = found->second;
+                    w.main_composition_controller = composition_controller;
                     w.main_controller = controller;
                     controller->get_CoreWebView2(&w.main_webview);
+                    // Attach the WebView2's visual under our DirectComposition root so
+                    // its output composites into the redirection-less window; without
+                    // this, nothing renders in composition hosting.
+                    if (w.dcomp_root_visual) {
+                        composition_controller->put_RootVisualTarget(w.dcomp_root_visual.Get());
+                        if (host->dcomp_device) host->dcomp_device->Commit();
+                    }
                     RECT rc;
                     GetClientRect(hwnd, &rc);
                     controller->put_Bounds(rc);
                     controller->put_IsVisible(TRUE);
+                    // Opaque deep-purple in "solid" mode, fully transparent in the
+                    // see-through modes. Set from the persisted host->backdrop_mode so
+                    // it is correct on first show and survives kiosk enter/exit and
+                    // resizes (those keep this controller, so the color sticks).
+                    {
+                        ComPtr<ICoreWebView2Controller2> controller2;
+                        if (SUCCEEDED(controller.As(&controller2)) && controller2) {
+                            controller2->put_DefaultBackgroundColor(backdropColor(host->backdrop_mode));
+                        }
+                    }
                     if (w.main_webview) {
                         ComPtr<ICoreWebView2Settings> settings;
                         if (SUCCEEDED(w.main_webview->get_Settings(&settings)) && settings) {
@@ -1016,7 +1177,8 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 std::wstring message(raw);
                                 CoTaskMemFree(raw);
                                 if (message == L"start" || message == L"quit" ||
-                                    message == L"requestAccessibility" || message == L"checkAccessibility") {
+                                    message == L"requestAccessibility" || message == L"checkAccessibility" ||
+                                    message.rfind(L"backdrop:", 0) == 0) {
                                     handleControlCommand(host, message);
                                     return S_OK;
                                 }
@@ -1063,11 +1225,16 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                         // frontend wasn't found at the mapped asset folder).
                         EventRegistrationToken navc_token = {};
                         w.main_webview->add_NavigationCompleted(Callback<ICoreWebView2NavigationCompletedEventHandler>(
-                            [lifetime](ICoreWebView2 *, ICoreWebView2NavigationCompletedEventArgs *args) -> HRESULT {
+                            [host, window_id, lifetime](ICoreWebView2 *, ICoreWebView2NavigationCompletedEventArgs *args) -> HRESULT {
                                 auto token = lifetime.lock();
                                 if (!token) return S_OK;
                                 std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive || !args) return S_OK;
+                                // First (and every) navigation done: reveal the window
+                                // now that the composition surface has real content, so
+                                // the deferred initial show doesn't flash the desktop.
+                                auto wi = host->windows.find(window_id);
+                                if (wi != host->windows.end()) showHostWindow(wi->second);
                                 BOOL ok = TRUE;
                                 args->get_IsSuccess(&ok);
                                 if (!ok) {
@@ -1152,6 +1319,39 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
 }
 #endif
 
+#if ZERO_NATIVE_HAS_WEBVIEW2
+static Window *windowForHwnd(Host *host, HWND hwnd) {
+    if (!host) return nullptr;
+    for (auto &entry : host->windows) {
+        if (entry.second.hwnd == hwnd) return &entry.second;
+    }
+    return nullptr;
+}
+
+// Composition hosting doesn't auto-route input the way windowed hosting did, so the
+// host forwards mouse messages to the WebView2 via SendMouseInput. The
+// COREWEBVIEW2_MOUSE_EVENT_KIND / *_VIRTUAL_KEYS values equal the matching WM_* / MK_*
+// constants, so the message id and wParam map across directly. Our web view fills the
+// client area at (0,0), so client coordinates are already web-view coordinates.
+static void forwardMouseInput(Window *w, HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (!w || !w->main_composition_controller) return;
+    POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+    if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+        // Wheel messages carry screen coordinates; the others are client-relative.
+        ScreenToClient(hwnd, &point);
+    }
+    UINT32 mouse_data = 0;
+    if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+        mouse_data = (UINT32)(SHORT)HIWORD(wparam);  // signed wheel delta
+    } else if (message == WM_XBUTTONDOWN || message == WM_XBUTTONUP || message == WM_XBUTTONDBLCLK) {
+        mouse_data = GET_XBUTTON_WPARAM(wparam);
+    }
+    auto keys = static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(GET_KEYSTATE_WPARAM(wparam));
+    w->main_composition_controller->SendMouseInput(
+        static_cast<COREWEBVIEW2_MOUSE_EVENT_KIND>(message), keys, mouse_data, point);
+}
+#endif
+
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -1185,6 +1385,48 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 }
             }
             return 0;
+#if ZERO_NATIVE_HAS_WEBVIEW2
+        case WM_MOUSEMOVE:
+        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+        case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+        case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL: {
+            Window *w = windowForHwnd(host, hwnd);
+            if (w && w->main_composition_controller) {
+                // Capture on button-down so click-drag painting keeps getting moves
+                // even if the pointer briefly leaves the window; release once no
+                // button is held. Request WM_MOUSELEAVE so the page sees pointer-out.
+                if (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN ||
+                    message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN) {
+                    SetCapture(hwnd);
+                } else if (message == WM_LBUTTONUP || message == WM_RBUTTONUP ||
+                           message == WM_MBUTTONUP || message == WM_XBUTTONUP) {
+                    if ((GET_KEYSTATE_WPARAM(wparam) &
+                         (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2)) == 0) {
+                        ReleaseCapture();
+                    }
+                } else if (message == WM_MOUSEMOVE) {
+                    TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+                    TrackMouseEvent(&tme);
+                }
+                forwardMouseInput(w, hwnd, message, wparam, lparam);
+                return 0;
+            }
+            break;  // no web view yet: fall through to DefWindowProc
+        }
+        case WM_MOUSELEAVE: {
+            Window *w = windowForHwnd(host, hwnd);
+            if (w && w->main_composition_controller) {
+                POINT pt = { 0, 0 };
+                w->main_composition_controller->SendMouseInput(
+                    COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                    static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(0), 0, pt);
+                return 0;
+            }
+            break;
+        }
+#endif
         case WM_KEYPARTY_KEY:
             if (host) {
                 KeyMsg *km = reinterpret_cast<KeyMsg *>(lparam);
@@ -1198,6 +1440,22 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) exitKioskToMenu(host);
             return 0;
         case WM_SETFOCUS:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd != hwnd) continue;
+                    emit(host, entry.second, kWindowFrame);
+#if ZERO_NATIVE_HAS_WEBVIEW2
+                    // Composition hosting: hand keyboard focus to the web view so it
+                    // receives key input (windowed mode did this automatically). In
+                    // kiosk mode the global hook injects keys regardless; this is what
+                    // makes the menu and the no-kiosk dev game keyboard-driven.
+                    if (entry.second.main_controller) {
+                        entry.second.main_controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+                    }
+#endif
+                }
+            }
+            return 0;
         case WM_KILLFOCUS:
         case WM_MOVE:
             if (host) {
@@ -1238,10 +1496,19 @@ static ATOM registerClass(Host *host) {
     wc.lpfnWndProc = windowProc;
     wc.hInstance = host->instance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    // Dark background to match the game — avoids a white flash behind the webview
-    // during load/resize and matches the dark title bar.
+#if ZERO_NATIVE_HAS_WEBVIEW2
+    // Composition hosting paints the whole client area through the DirectComposition
+    // visual tree (the WebView2 surface), and the window has no opaque redirection
+    // bitmap (WS_EX_NOREDIRECTIONBITMAP), so a GDI class brush has nothing to fill —
+    // and filling opaque would defeat the see-through modes. Leave it null; the
+    // WebView2 default background color provides the opaque dark fill in solid mode.
+    wc.hbrBackground = nullptr;
+#else
+    // No WebView2 (blank-window stub build): keep the dark class brush so the bare
+    // window matches the game chrome instead of flashing white.
     static HBRUSH frameBrush = CreateSolidBrush(kFrameColor);
     wc.hbrBackground = frameBrush;
+#endif
     wc.lpszClassName = L"ZeroNativeWindowsHost";
     // App icon, embedded in the exe via assets/icon.rc. Big drives the
     // Alt-Tab/taskbar icon; small drives the title-bar corner.
@@ -1255,8 +1522,17 @@ static ATOM registerClass(Host *host) {
 static bool createNativeWindow(Host *host, Window &window) {
     registerClass(host);
     std::wstring title = widen(window.title.empty() ? host->window_title : window.title);
+    DWORD ex_style = 0;
+#if ZERO_NATIVE_HAS_WEBVIEW2
+    // No opaque redirection bitmap: the window has no GDI surface of its own, so
+    // wherever the DirectComposition visual tree (the WebView2 output) is transparent
+    // the desktop shows through. This is what makes the see-through backdrop modes
+    // possible — a windowed WebView2 cannot be transparent. The DWM non-client frame
+    // (the dark caption/border) still renders normally over the composition content.
+    ex_style = WS_EX_NOREDIRECTIONBITMAP;
+#endif
     HWND hwnd = CreateWindowExW(
-        0,
+        ex_style,
         L"ZeroNativeWindowsHost",
         title.c_str(),
         WS_OVERLAPPEDWINDOW,
@@ -1288,8 +1564,19 @@ static bool createNativeWindow(Host *host, Window &window) {
     COLORREF caption = kFrameColor;
     DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &caption, sizeof(caption));
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
+#if ZERO_NATIVE_HAS_WEBVIEW2
+    // Stand up the DirectComposition target + root visual now; the WebView2's visual
+    // is attached under the root once its controller is created (ensureMainWebView).
+    setupComposition(host, window);
+    // The main window (id 1) is revealed only once its WebView2 first paints (see
+    // showHostWindow) so the redirection-less surface isn't shown empty — that would
+    // briefly flash the desktop through it even in solid mode. Secondary windows
+    // (the generic create_window API) have no deferred main web view, so show now.
+    if (window.id != 1) showHostWindow(window);
+#else
+    // No WebView2: nothing to wait for, so show the (opaque class-brush) window now.
+    showHostWindow(window);
+#endif
     SetTimer(hwnd, 1, 16, nullptr);
     return true;
 }
