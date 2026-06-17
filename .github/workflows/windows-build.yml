@@ -1,21 +1,13 @@
 name: Windows build (test)
 
 # On-demand Windows builds for testing — no release required. Trigger it from the
-# Actions tab ("Run workflow"), or it runs automatically on pushes that touch the
-# native shell / frontend. Download the "keyparty-windows" artifact, unzip, and
-# run KeyParty.exe — a single self-contained file (the frontend is embedded and
-# the WebView2 loader is static-linked, so there's no DLL or assets folder).
+# Actions tab ("Run workflow"), or by pushing a commit whose message contains
+# "windows". Download the "keyparty-windows" artifact, unzip, and run
+# KeyParty.exe — a single self-contained file (the frontend is embedded and the
+# WebView2 loader is static-linked, so there's no DLL or assets folder).
 on:
   workflow_dispatch:
   push:
-    paths:
-      - "native/**"
-      - "build.zig"
-      - "build.zig.zon"
-      - "app.zon"
-      - "frontend/**"
-      - "scripts/embed-assets.mjs"
-      - ".github/workflows/windows-build.yml"
 
 permissions:
   contents: read
@@ -27,6 +19,12 @@ concurrency:
 
 jobs:
   windows:
+    # Skip on pushes unless the commit asks for it — keeps this slow Windows build
+    # off routine pushes. Manual "Run workflow" always runs (no head_commit, so the
+    # first clause matches). GitHub can't filter pushes by commit message at the
+    # trigger level, hence the job-level gate; contains() is case-insensitive, so
+    # "Windows"/"WINDOWS" match too.
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'windows') }}
     runs-on: windows-latest
     env:
       # Where the WebView2 SDK headers land (NuGet, version stripped).
