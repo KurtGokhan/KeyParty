@@ -45,10 +45,13 @@
 // Composition (visual) hosting: the WebView2 renders into a DirectComposition
 // visual we own instead of a windowed child HWND. That is the only way to get a
 // transparent WebView2 (the see-through backdrop modes). <dxgi1_2.h> declares
-// IDXGIDevice (a DCompositionCreateDevice parameter type); <dcomp.h> is the DComp
-// API; <windowsx.h> has the GET_X_LPARAM/GET_Y_LPARAM helpers used by the input
-// forwarding that composition hosting requires (windowed mode routed input for us).
+// IDXGIDevice (a DCompositionCreateDevice parameter type); <d2d1.h> must precede
+// <dcomp.h> because dcomp.h uses the D2D_* base types (D2D_MATRIX_3X2_F, etc.)
+// without including them itself; <dcomp.h> is the DComp API; <windowsx.h> has the
+// GET_X_LPARAM/GET_Y_LPARAM helpers used by the input forwarding that composition
+// hosting requires (windowed mode routed input for us).
 #include <dxgi1_2.h>
+#include <d2d1.h>
 #include <dcomp.h>
 #include <windowsx.h>
 #define ZERO_NATIVE_HAS_WEBVIEW2 1
@@ -996,7 +999,8 @@ static std::wstring resolveAssetRoot(const std::string &root_utf8) {
 static bool setupComposition(Host *host, Window &w) {
     if (!host || !w.hwnd) return false;
     if (!host->dcomp_device) {
-        if (FAILED(DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&host->dcomp_device))) ||
+        if (FAILED(DCompositionCreateDevice(nullptr, __uuidof(IDCompositionDevice),
+                                            reinterpret_cast<void **>(host->dcomp_device.GetAddressOf()))) ||
             !host->dcomp_device) {
             return false;
         }
@@ -1078,7 +1082,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
             auto found = host->windows.find(window_id);
             if (found == host->windows.end() || found->second.hwnd != hwnd || !IsWindow(hwnd)) return S_OK;
             ComPtr<ICoreWebView2Environment3> environment3;
-            if (FAILED(environment->QueryInterface(IID_PPV_ARGS(&environment3))) || !environment3) {
+            if (FAILED(host->environment.As(&environment3)) || !environment3) {
                 MessageBoxW(hwnd,
                             L"This WebView2 runtime is too old for composition (visual) hosting "
                             L"(ICoreWebView2Environment3 is unavailable). Update the WebView2 "
@@ -1114,8 +1118,9 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                         if (wfail != host->windows.end()) showHostWindow(wfail->second);
                         return controller_result;
                     }
+                    ComPtr<ICoreWebView2CompositionController> comp_controller(composition_controller);
                     ComPtr<ICoreWebView2Controller> controller;
-                    if (FAILED(composition_controller->QueryInterface(IID_PPV_ARGS(&controller))) || !controller) {
+                    if (FAILED(comp_controller.As(&controller)) || !controller) {
                         composition_controller->Close();
                         return E_NOINTERFACE;
                     }
@@ -1125,7 +1130,7 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                         return S_OK;
                     }
                     Window &w = found->second;
-                    w.main_composition_controller = composition_controller;
+                    w.main_composition_controller = comp_controller;
                     w.main_controller = controller;
                     controller->get_CoreWebView2(&w.main_webview);
                     // Attach the WebView2's visual under our DirectComposition root so

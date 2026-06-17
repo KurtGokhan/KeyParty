@@ -344,13 +344,23 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 // winrt (wrl.h), and STL headers from %INCLUDE%; only the WebView2
                 // SDK headers (from NuGet) need to be passed in. /MD matches the
                 // dynamic UCRT Zig links for the msvc target.
-                const cl = b.addSystemCommand(&.{ "cl", "/nologo", "/c", "/std:c++17", "/EHsc", "/MD", "/O2" });
+                // cl.exe writes its diagnostics (errors AND warnings) to STDOUT, not
+                // stderr. Zig's Run step captures a command's stdout when it has an
+                // output-file argument (the /Fo object below) and does not echo it on
+                // failure — only stderr — so a cl compile error would otherwise show
+                // up in CI as a bare "process exited with error code 2" with no
+                // message. Run cl through cmd.exe and redirect its stdout to stderr
+                // (the trailing "1>&2") so failures are diagnosable. Zig passes "1>&2"
+                // verbatim (it only quotes args with spaces/tabs/quotes), so cmd sees
+                // it as a redirection rather than an argument to cl.
+                const cl = b.addSystemCommand(&.{ "cmd", "/C", "cl", "/nologo", "/c", "/std:c++17", "/EHsc", "/MD", "/O2" });
                 if (webview2_include) |inc| cl.addArg(b.fmt("/I{s}", .{inc}));
                 // winrt is already on cl's %INCLUDE%; pass it too if provided, as a
                 // belt-and-suspenders for setups where it isn't.
                 if (winrt_include) |inc| cl.addArg(b.fmt("/I{s}", .{inc}));
                 const host_obj = cl.addPrefixedOutputFileArg("/Fo", "webview2_host.obj");
                 cl.addFileArg(b.path("native/webview2_host.cpp"));
+                cl.addArg("1>&2");
                 app_mod.addObjectFile(host_obj);
             },
             .chromium => {
