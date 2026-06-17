@@ -1,5 +1,12 @@
 # keyparty
 
+## 1.0.1
+
+### Patch Changes
+
+- c08a03c: Name the downloadable builds **KeyParty.exe** and **KeyParty.dmg** (was `keyparty-windows.exe` / `keyparty-macos.dmg`). The in-app download links and the stable `releases/latest/download/…` URLs are updated to match.
+- 70e8711: Open the menu in the see-through **transparent** backdrop by default instead of the solid deep-purple chrome. The web UI and both native shells (macOS / Windows) now start in transparent mode; the grown-up can still cycle back to solid/blurry from the menu's Background toggle.
+
 ## 1.0.0
 
 ### Major Changes
