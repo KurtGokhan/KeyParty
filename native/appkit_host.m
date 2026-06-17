@@ -1479,11 +1479,18 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 
     if ([mode isEqualToString:@"solid"]) {
         window.opaque = YES;
-        // Restore the deep-purple chrome (matches -createWindowWithId:).
+        // Restore the deep-purple chrome (matches -createWindowWithId:). The
+        // transparent title bar lets that dark background paint it so it blends
+        // into the game.
         window.backgroundColor = [NSColor colorWithSRGBRed:11.0 / 255.0 green:4.0 / 255.0 blue:32.0 / 255.0 alpha:1.0];
+        window.titlebarAppearsTransparent = YES;
     } else {
         window.opaque = NO;
         window.backgroundColor = [NSColor clearColor];
+        // Keep a solid system title bar over the see-through content: a
+        // transparent title bar over a clear window leaves the title unreadable
+        // and glitchy (the desktop shows straight through it).
+        window.titlebarAppearsTransparent = NO;
     }
 }
 

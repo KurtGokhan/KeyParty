@@ -427,12 +427,11 @@ export default function Home() {
       if (glyphs.length > 20) glyphs.shift();
     };
 
-    // True only when the window is non-opaque and the desktop is showing through
-    // (the kp-blurry / kp-transparent classes the menu toggle sets on <html>).
-    const seeThrough = () => {
-      const c = document.documentElement.classList;
-      return c.contains("kp-blurry") || c.contains("kp-transparent");
-    };
+    // True only in "transparent" mode (the raw, sharp desktop showing through).
+    // Blur ripples are skipped in "blurry" mode, where the whole desktop is
+    // already blurred so a ripple would add nothing.
+    const isTransparentMode = () =>
+      document.documentElement.classList.contains("kp-transparent");
 
     // A rare "blur shockwave": an expanding circle whose backdrop-filter blurs the
     // desktop (and canvas) showing through within it, then fades. It has to be a
@@ -462,7 +461,6 @@ export default function Home() {
             left: `${x}px`,
             top: `${y}px`,
             backdropFilter: "blur(0px)",
-            // boxShadow: "inset 0 0 0 2px rgba(255,255,255,0.22)",
           },
           { backdropFilter: `blur(${peak}px)`, offset: 0.15 },
           { backdropFilter: `blur(${peak}px)`, offset: 0.7 },
@@ -472,7 +470,6 @@ export default function Home() {
             left: `${x - maxD / 2}px`,
             top: `${y - maxD / 2}px`,
             backdropFilter: "blur(0px)",
-            // boxShadow: "inset 0 0 0 2px rgba(255,255,255,0)",
           },
         ],
         { duration: 850, easing: "cubic-bezier(0.22, 0.61, 0.36, 1)", fill: "both" },
@@ -752,10 +749,9 @@ export default function Home() {
         }
       }
 
-      // Once in a while (only when the desktop shows through), a fresh press also
-      // sends out a blur shockwave. Rare, and never on key-repeat, so a held key
-      // doesn't machine-gun them. Chance is tunable.
-      if (!repeat && seeThrough() && Math.random() < 0.1) {
+      // A fresh press in "transparent" mode also sends out a blur shockwave.
+      // Never on key-repeat, so a held key doesn't machine-gun them.
+      if (!repeat && isTransparentMode()) {
         spawnBlurRipple(fx, fy);
       }
 

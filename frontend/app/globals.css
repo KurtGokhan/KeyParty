@@ -55,20 +55,22 @@ canvas {
   pointer-events: none;
 }
 
-/* A single expanding blur shockwave. backdrop-filter blurs whatever shows through
-   behind it (the desktop, since the window is non-opaque); the rim gives the wave
-   front some definition. JS scales and fades it, then removes it. */
+/* A single expanding blur shockwave: backdrop-filter blurs whatever shows through
+   behind it (the desktop, since the window is non-opaque). No border or shadow —
+   just the blur. Size and blur radius are driven by the JS animation (fill: both)
+   in spawnBlurRipple — see page.tsx.
+
+   The radial mask fades the disc's alpha out toward the rim. Without it WebKit
+   leaves a dark ring at the edge of any hard-edged backdrop-filter region (the
+   blur kernel clamps the out-of-bounds samples toward black) — that's the "shadow
+   on the rim". A soft edge means there's no hard boundary for the ring to form. */
 .fx-blur-ripple {
   position: absolute;
   border-radius: 50%;
   pointer-events: none;
   will-change: backdrop-filter;
-  /* size, backdrop-filter and box-shadow are all driven by the JS animation
-     (fill: both) in spawnBlurRipple — see page.tsx. */
-  /* backdrop-filter: blur(1px) !important; */
-  /* box-shadow:
-    inset 0 0 0 2px rgba(255, 255, 255, 0.18),
-    0 0 24px rgba(255, 255, 255, 0.06); */
+  -webkit-mask: radial-gradient(closest-side, #000 60%, transparent 100%);
+  mask: radial-gradient(closest-side, #000 60%, transparent 100%);
 }
 
 /* Big "smash any key" prompt shown until the first key. */
