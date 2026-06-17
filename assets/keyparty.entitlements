@@ -15,8 +15,9 @@
     signing entitlement — so nothing is required for it here either.
 
     Intentionally empty. The codesign step in .github/workflows/release.yml signs
-    with --options runtime (Hardened Runtime, required for notarization) using
-    this file; add an entitlement below only if a future capability needs one.
+    with the Hardened Runtime enabled (the "runtime" signing option, required for
+    notarization) using this file; add an entitlement below only if a future
+    capability needs one.
   -->
 </dict>
 </plist>
