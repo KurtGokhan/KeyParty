@@ -204,11 +204,13 @@ struct Host {
     std::wstring user_data_folder;
     bool kiosk_active = false;
     // KeyParty: current see-through background mode (window.keyparty.setBackdrop):
-    // "solid" (opaque deep-purple chrome, the default), "blurry"/"transparent" (the
-    // window is non-opaque so the desktop shows through the transparent web view; the
-    // blur in "blurry" is done entirely in CSS). Persisted so kiosk enter/exit and
-    // resizes keep it. Mirrors backdropMode in native/appkit_host.m.
-    std::wstring backdrop_mode = L"solid";
+    // "solid" (opaque deep-purple chrome), "blurry"/"transparent" (the window is
+    // non-opaque so the desktop shows through the transparent web view; the blur in
+    // "blurry" is done entirely in CSS). Defaults to "transparent" — the see-through
+    // desktop backdrop the menu opens in, matching the web UI and appkit_host.m; the
+    // controller picks this up at creation. Persisted so kiosk enter/exit and resizes
+    // keep it. Mirrors backdropMode in native/appkit_host.m.
+    std::wstring backdrop_mode = L"transparent";
 #if ZERO_NATIVE_HAS_WEBVIEW2
     // Kept alive so the WebResourceRequested handler can build responses
     // (CreateWebResourceResponse lives on the environment).

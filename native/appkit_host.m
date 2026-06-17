@@ -533,6 +533,11 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
         self.bridgeScriptHandler = bridgeScriptHandler;
         self.assetSchemeHandler = assetSchemeHandler;
         self.windowLabel = label.length > 0 ? label : @"main";
+        // KeyParty: the menu opens in the see-through "transparent" backdrop by
+        // default (the web UI starts in the same mode). -applyBackdrop: flips the
+        // freshly-made opaque window non-opaque so the real desktop shows through;
+        // the grown-up can cycle back to solid/blurry from the menu toggle.
+        [self applyBackdrop:@"transparent"];
     } else {
         [window makeKeyAndOrderFront:nil];
         [NSApp activate];
@@ -1463,9 +1468,10 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 }
 
 // KeyParty: switch the menu window's background between three modes.
-//   "solid"       — opaque deep-purple chrome (the default).
+//   "solid"       — opaque deep-purple chrome.
 //   "blurry"      — non-opaque window; the web layer blurs the desktop in CSS.
 //   "transparent" — non-opaque window; the raw desktop shows through, sharp.
+// The menu opens in "transparent" (applied at window creation); the toggle cycles.
 // The only native difference is window opacity. The web UI handles the rest via
 // the kp-blurry / kp-transparent classes (see globals.css): for both it drops the
 // opaque page fills so the desktop shows, and for "blurry" it adds the CSS blur.

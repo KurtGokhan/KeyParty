@@ -188,8 +188,11 @@ export default function Home() {
   const [os, setOs] = useState<DesktopOS | null>(null);
   // Glass background: canBackdrop is true once the native shell exposes
   // setBackdrop (macOS); `backdrop` is the live mode the menu toggle cycles.
+  // Defaults to "transparent" — the see-through desktop backdrop — to match the
+  // native shells, which also open in transparent mode (see appkit_host.m /
+  // webview2_host.cpp). The menu toggle cycles back to solid/blurry from here.
   const [canBackdrop, setCanBackdrop] = useState(false);
-  const [backdrop, setBackdrop] = useState<BackdropMode>("solid");
+  const [backdrop, setBackdrop] = useState<BackdropMode>("transparent");
   // Imperative hooks into the game engine, published by the game effect.
   const engineRef = useRef<{ enterPlaying: () => void; returnToMenu: () => void } | null>(null);
 
