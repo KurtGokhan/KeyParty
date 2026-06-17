@@ -5,6 +5,11 @@ on:
     branches: [main]
 
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build & attach binaries to, e.g. v1.0.0. Leave blank for the normal Changesets release flow."
+        required: false
+        type: string
 
 # Changesets needs to push the version commit/tag and open the version PR;
 # the binary job needs to upload an asset to the release.
@@ -51,7 +56,10 @@ jobs:
   # 2. Build the macOS app and attach it to the release Changesets just created.
   binary-macos:
     needs: release
-    if: needs.release.outputs.published == 'true'
+    # Normal flow: only when Changesets published a new version. Manual flow:
+    # a workflow_dispatch with a `tag` input rebuilds/attaches binaries to that
+    # existing release without needing a publish.
+    if: ${{ needs.release.outputs.published == 'true' || inputs.tag != '' }}
     runs-on: macos-latest
     # Signing + notarization secrets. When unset, the signing steps below are
     # skipped and the build ships unsigned (first launch needs right-click →
@@ -83,11 +91,19 @@ jobs:
       - name: Resolve the released version
         id: ver
         run: |
-          VER=$(echo '${{ needs.release.outputs.publishedPackages }}' | jq -r '.[0].version')
+          # Manual dispatch with a tag attaches to that existing release;
+          # otherwise use the version Changesets just published. Changesets tags
+          # a single-package repo as v<version> (only monorepos use
+          # <name>@<version>), so the normal release tag is "v$VER".
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            VER="${TAG#v}"
+          else
+            VER=$(echo '${{ needs.release.outputs.publishedPackages }}' | jq -r '.[0].version')
+            TAG="v$VER"
+          fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          # Changesets tags a single-package repo as v<version> (only monorepos
-          # use <name>@<version>), so the release we upload assets to is "v$VER".
-          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Build & package the macOS app
         env:
@@ -179,7 +195,10 @@ jobs:
   # 3. Build the Windows app (full-screen kiosk WebView2 host) and attach it.
   binary-windows:
     needs: release
-    if: needs.release.outputs.published == 'true'
+    # Normal flow: only when Changesets published a new version. Manual flow:
+    # a workflow_dispatch with a `tag` input rebuilds/attaches binaries to that
+    # existing release without needing a publish.
+    if: ${{ needs.release.outputs.published == 'true' || inputs.tag != '' }}
     runs-on: windows-latest
     env:
       # Where the WebView2 SDK headers land (NuGet, version stripped).
@@ -218,11 +237,19 @@ jobs:
         id: ver
         shell: bash
         run: |
-          VER=$(echo '${{ needs.release.outputs.publishedPackages }}' | jq -r '.[0].version')
+          # Manual dispatch with a tag attaches to that existing release;
+          # otherwise use the version Changesets just published. Changesets tags
+          # a single-package repo as v<version> (only monorepos use
+          # <name>@<version>), so the normal release tag is "v$VER".
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            VER="${TAG#v}"
+          else
+            VER=$(echo '${{ needs.release.outputs.publishedPackages }}' | jq -r '.[0].version')
+            TAG="v$VER"
+          fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          # Changesets tags a single-package repo as v<version> (only monorepos
-          # use <name>@<version>), so the release we upload assets to is "v$VER".
-          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Build the single-file Windows exe
         shell: bash
