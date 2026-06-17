@@ -200,7 +200,7 @@ Don't want to install MSVC? Run the **Windows build (test)** workflow
 ([`.github/workflows/windows-build.yml`](.github/workflows/windows-build.yml))
 from the repo's **Actions** tab — or just push a change under `native/`,
 `build.zig`, `app.zon`, or `frontend/` and it runs automatically. Download the
-**keyparty-windows** artifact, unzip it, and run **`keyparty.exe`** — it's a
+**keyparty-windows** artifact, unzip it, and run **`KeyParty.exe`** — it's a
 single self-contained file (frontend embedded, loader static-linked). No release
 needed.
 
@@ -234,13 +234,13 @@ Versioning and releases run on [Changesets](https://github.com/changesets/change
    tags the release (`keyparty@x.y.z`), and creates a GitHub Release.
 3. The same workflow then builds the apps on two runners and uploads both to the
    release:
-   - **macOS** — `keyparty-macos.dmg` (a drag-to-Applications disk image holding
+   - **macOS** — `KeyParty.dmg` (a drag-to-Applications disk image holding
      `Key Party.app`, built from `zig build package`). **Signed (Developer ID) and
      notarized** when the signing secrets are configured (see [Code signing](#code-signing)
      below) — it then launches with no Gatekeeper prompt. Without those secrets it
      ships **unsigned**, so first launch needs right-click → Open (or clearing the
      quarantine flag).
-   - **Windows** — `keyparty-windows.exe`, a single self-contained file
+   - **Windows** — `KeyParty.exe`, a single self-contained file
      (frontend embedded, WebView2 loader static-linked), via `zig build` against
      the WebView2 SDK headers + static loader lib (restored from NuGet). Currently
      **unsigned** (signing is scaffolded but inert — see [Code signing](#code-signing)

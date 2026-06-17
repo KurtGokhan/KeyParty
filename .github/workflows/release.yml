@@ -172,32 +172,32 @@ jobs:
           rm -rf "$STAGE" && mkdir -p "$STAGE"
           cp -R "$APP" "$STAGE/Key Party.app"
           ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname "Key Party" -srcfolder "$STAGE" -ov -format UDZO "keyparty-macos.dmg"
+          hdiutil create -volname "Key Party" -srcfolder "$STAGE" -ov -format UDZO "KeyParty.dmg"
 
       - name: Sign & notarize the .dmg
         if: ${{ env.MACOS_CERTIFICATE != '' }}
         run: |
           codesign --force --timestamp --keychain "$KEYCHAIN" \
-            --sign "$MACOS_SIGN_IDENTITY" "keyparty-macos.dmg"
+            --sign "$MACOS_SIGN_IDENTITY" "KeyParty.dmg"
           if [ -n "$APPLE_NOTARY_KEY" ]; then
             echo "$APPLE_NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
             # --wait blocks until Apple finishes; staple embeds the ticket so the
             # .dmg launches offline with no Gatekeeper prompt.
-            xcrun notarytool submit "keyparty-macos.dmg" \
+            xcrun notarytool submit "KeyParty.dmg" \
               --key "$RUNNER_TEMP/notary.p8" \
               --key-id "$APPLE_NOTARY_KEY_ID" \
               --issuer "$APPLE_NOTARY_ISSUER" \
               --wait
-            xcrun stapler staple "keyparty-macos.dmg"
+            xcrun stapler staple "KeyParty.dmg"
             rm -f "$RUNNER_TEMP/notary.p8"
           else
             echo "::warning::APPLE_NOTARY_KEY unset — .dmg is signed but NOT notarized; Gatekeeper will still warn."
           fi
 
       - name: Attach the .dmg to the release
-        # Version-less name -> https://github.com/<owner>/<repo>/releases/latest/download/keyparty-macos.dmg
+        # Version-less name -> https://github.com/<owner>/<repo>/releases/latest/download/KeyParty.dmg
         # is a stable link the web build can point at.
-        run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-macos.dmg" --clobber
+        run: gh release upload "${{ steps.ver.outputs.tag }}" "KeyParty.dmg" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -286,24 +286,24 @@ jobs:
             -Dwebview2-include="$WV2_INC" \
             -Dwebview2-lib-dir="$WV2_LIB"
           test -f zig-out/bin/keyparty.exe || { echo "ERROR: no exe produced"; ls -R zig-out; exit 1; }
-          # Version-less name -> .../releases/latest/download/keyparty-windows.exe is stable.
-          cp zig-out/bin/keyparty.exe "keyparty-windows.exe"
+          # Version-less name -> .../releases/latest/download/KeyParty.exe is stable.
+          cp zig-out/bin/keyparty.exe "KeyParty.exe"
 
       - name: Sign the Windows exe (scaffold — skipped until a cert is configured)
         # Inert today (no WINDOWS_SIGN_CERT secret). Public-trust Windows certs now
         # require hardware/cloud key storage, so plug your provider in here:
         #   • Microsoft Trusted Signing: azure/trusted-signing-action@v0
         #   • DigiCert KeyLocker / SSL.com eSigner: the provider's signtool dlib
-        #   • signtool: signtool sign /fd SHA256 /tr <timestamp-url> /td SHA256 keyparty-windows.exe
+        #   • signtool: signtool sign /fd SHA256 /tr <timestamp-url> /td SHA256 KeyParty.exe
         # Replace the echo with the real command; the signed exe then flows through
         # to the existing upload step unchanged.
         if: ${{ env.WINDOWS_SIGN_CERT != '' }}
         shell: bash
         run: |
-          echo "TODO: sign keyparty-windows.exe (see step comment for provider options)."
+          echo "TODO: sign KeyParty.exe (see step comment for provider options)."
 
       - name: Attach the binary to the release
         shell: bash
-        run: gh release upload "${{ steps.ver.outputs.tag }}" "keyparty-windows.exe" --clobber
+        run: gh release upload "${{ steps.ver.outputs.tag }}" "KeyParty.exe" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

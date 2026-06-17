@@ -47,8 +47,8 @@ const keyPartyBridge = (): KeyPartyBridge | undefined =>
 // the native kiosk shell does.
 const REPO_URL = "https://github.com/KurtGokhan/KeyParty";
 const DOWNLOADS = {
-  mac: `${REPO_URL}/releases/latest/download/keyparty-macos.dmg`,
-  windows: `${REPO_URL}/releases/latest/download/keyparty-windows.exe`,
+  mac: `${REPO_URL}/releases/latest/download/KeyParty.dmg`,
+  windows: `${REPO_URL}/releases/latest/download/KeyParty.exe`,
 };
 
 type DesktopOS = "mac" | "windows" | "other";
