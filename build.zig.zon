@@ -1,7 +1,7 @@
 .{
     .name = .keyparty,
     .fingerprint = 0x52b7e53265d464ee,
-    .version = "0.1.0",
+    .version = "1.0.0",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "frontend", "app.zon", "README.md" },
