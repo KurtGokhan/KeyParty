@@ -54,9 +54,18 @@
 #include <d2d1.h>
 #include <dcomp.h>
 #include <windowsx.h>
+// CoreWebView2EnvironmentOptions (a WRL impl of ICoreWebView2EnvironmentOptions)
+// lets us pass Chromium browser switches at environment creation. It ships in the
+// same WebView2 SDK include dir as WebView2.h; guard the include so a stripped SDK
+// still builds (we just fall back to default options then).
+#if __has_include(<WebView2EnvironmentOptions.h>)
+#include <WebView2EnvironmentOptions.h>
+#define ZERO_NATIVE_HAS_WV2_ENV_OPTIONS 1
+#endif
 #define ZERO_NATIVE_HAS_WEBVIEW2 1
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
+using Microsoft::WRL::Make;
 #else
 #define ZERO_NATIVE_HAS_WEBVIEW2 0
 // Without these headers the host can only open a bare window with no web content
@@ -1099,7 +1108,28 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
     HWND hwnd = it->second.hwnd;
     std::weak_ptr<HostLifetime> lifetime = host->lifetime;
     const wchar_t *user_data = host->user_data_folder.empty() ? nullptr : host->user_data_folder.c_str();
-    factory(nullptr, user_data, nullptr, Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+    // Disable WebView2's persistent HTTP disk cache. The whole frontend is served
+    // from the in-binary blob via WebResourceRequested, so the disk cache buys us
+    // nothing and actively hurts: it survives across builds under the user-data
+    // folder, and a cache HIT short-circuits WebResourceRequested entirely (our
+    // no-store header never gets a say). Stable-named subresources — e.g. the
+    // Next.js App Router RSC/hydration payloads (__next._full.txt), which are NOT
+    // covered by the index.html cache-bust — could then be served from an earlier
+    // build, so the page hydrated stale (old UI, missing the backdrop toggle) even
+    // though the new index.html and fresh content-hashed JS loaded. --disk-cache-
+    // size=1 makes Chromium hold ~nothing on disk: it evicts the existing poisoned
+    // entries on startup and never re-caches, so every request reaches our handler.
+    ComPtr<ICoreWebView2EnvironmentOptions> env_options;
+#ifdef ZERO_NATIVE_HAS_WV2_ENV_OPTIONS
+    {
+        auto opts = Make<CoreWebView2EnvironmentOptions>();
+        if (opts) {
+            opts->put_AdditionalBrowserArguments(L"--disk-cache-size=1");
+            opts.As(&env_options);
+        }
+    }
+#endif
+    factory(nullptr, user_data, env_options.Get(), Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
         [host, window_id, hwnd, lifetime](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
             auto token = lifetime.lock();
             if (!token) return S_OK;
