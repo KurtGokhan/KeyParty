@@ -49,6 +49,11 @@ jobs:
           # note and hides Quit.
           BASE_PATH: ${{ steps.pages.outputs.base_path }}
           NEXT_PUBLIC_WEB_BUILD: "1"
+          # Analytics IDs. Both are unset for forks that haven't added their own
+          # secrets (and for fork PRs, which never receive secrets) → the build
+          # emits no analytics, so forks never report into the upstream property.
+          NEXT_PUBLIC_GA_ID: ${{ secrets.GA_MEASUREMENT_ID }}
+          NEXT_PUBLIC_CF_BEACON_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
 
       - name: Disable Jekyll (serve Next's _next assets as-is)
         run: touch ./frontend/out/.nojekyll

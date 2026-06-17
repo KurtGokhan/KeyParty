@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { trackEvent } from "./analytics";
 
 /* ------------------------------------------------------------------ *
  * KeyParty — a key-smashing game for kids.
@@ -259,6 +260,12 @@ export default function Home() {
   const handleGrantAccess = () => {
     keyPartyBridge()?.requestAccessibility?.();
   };
+
+  // The download + repo links only render in the web build, which is exactly
+  // where GA is active — so these are the user actions worth measuring (the app
+  // store of this kids' game is "did the visitor grab the desktop app?").
+  const handleDownload = (target: "mac" | "windows") => () =>
+    trackEvent("download_app", { os: target });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1002,6 +1009,10 @@ export default function Home() {
       shake = 0;
     };
     const enterPlaying = () => {
+      // Guard so one Start counts once, even if the native shell echoes a
+      // "keyparty:playing" after handleStart already entered (a non-issue in
+      // the web build, where GA actually runs and there is no native shell).
+      const wasPlaying = modeRef.current === "playing";
       clearField();
       releaseAllKeys();
       count = 0;
@@ -1012,8 +1023,10 @@ export default function Home() {
       if (startRef.current) startRef.current.classList.remove("hidden");
       modeRef.current = "playing";
       setMode("playing");
+      if (!wasPlaying) trackEvent("start_game");
     };
     const returnToMenu = () => {
+      const wasPlaying = modeRef.current === "playing";
       clearField();
       releaseAllKeys();
       count = 0;
@@ -1025,6 +1038,7 @@ export default function Home() {
       }
       modeRef.current = "menu";
       setMode("menu");
+      if (wasPlaying) trackEvent("return_to_menu");
     };
     engineRef.current = { enterPlaying, returnToMenu };
 
@@ -1421,28 +1435,28 @@ export default function Home() {
                 <div className="downloads">
                   {os === "windows" ? (
                     <>
-                      <a className="btn btn-download" href={DOWNLOADS.windows} target="_blank" rel="noreferrer">
+                      <a className="btn btn-download" href={DOWNLOADS.windows} target="_blank" rel="noreferrer" onClick={handleDownload("windows")}>
                         ⬇ Download for Windows
                       </a>
-                      <a className="dl-alt" href={DOWNLOADS.mac} target="_blank" rel="noreferrer">
+                      <a className="dl-alt" href={DOWNLOADS.mac} target="_blank" rel="noreferrer" onClick={handleDownload("mac")}>
                         or the macOS version
                       </a>
                     </>
                   ) : os === "mac" ? (
                     <>
-                      <a className="btn btn-download" href={DOWNLOADS.mac} target="_blank" rel="noreferrer">
+                      <a className="btn btn-download" href={DOWNLOADS.mac} target="_blank" rel="noreferrer" onClick={handleDownload("mac")}>
                         ⬇ Download for macOS
                       </a>
-                      <a className="dl-alt" href={DOWNLOADS.windows} target="_blank" rel="noreferrer">
+                      <a className="dl-alt" href={DOWNLOADS.windows} target="_blank" rel="noreferrer" onClick={handleDownload("windows")}>
                         or the Windows version
                       </a>
                     </>
                   ) : (
                     <>
-                      <a className="btn btn-download" href={DOWNLOADS.mac} target="_blank" rel="noreferrer">
+                      <a className="btn btn-download" href={DOWNLOADS.mac} target="_blank" rel="noreferrer" onClick={handleDownload("mac")}>
                         ⬇ macOS
                       </a>
-                      <a className="btn btn-download" href={DOWNLOADS.windows} target="_blank" rel="noreferrer">
+                      <a className="btn btn-download" href={DOWNLOADS.windows} target="_blank" rel="noreferrer" onClick={handleDownload("windows")}>
                         ⬇ Windows
                       </a>
                     </>
@@ -1457,7 +1471,7 @@ export default function Home() {
             </p>
 
             {isWeb && (
-              <a className="repo-link" href={REPO_URL} target="_blank" rel="noreferrer">
+              <a className="repo-link" href={REPO_URL} target="_blank" rel="noreferrer" onClick={() => trackEvent("view_repo")}>
                 View on GitHub ↗
               </a>
             )}

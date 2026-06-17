@@ -88,6 +88,10 @@ jobs:
           echo "tag=keyparty@$VER" >> "$GITHUB_OUTPUT"
 
       - name: Build & package the macOS app
+        env:
+          # Embedded into the frontend by Next during `zig build` (which runs
+          # npm run build); tags desktop telemetry as platform=macos.
+          NEXT_PUBLIC_GA_ID: ${{ secrets.GA_MEASUREMENT_ID }}
         run: |
           zig build package \
             -Doptimize=ReleaseFast \
@@ -205,6 +209,10 @@ jobs:
 
       - name: Build the single-file Windows exe
         shell: bash
+        env:
+          # Embedded into the frontend by Next during `zig build` (which runs
+          # npm run build); tags desktop telemetry as platform=windows.
+          NEXT_PUBLIC_GA_ID: ${{ secrets.GA_MEASUREMENT_ID }}
         run: |
           WV2_INC="$GITHUB_WORKSPACE/$NUGET_DIR/build/native/include"
           WV2_LIB="$GITHUB_WORKSPACE/$NUGET_DIR/build/native/x64"
