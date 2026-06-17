@@ -1,5 +1,5 @@
 .{
-    .id ="dev.keyparty.app",
+    .id ="com.gkurt.keyparty",
     .name ="keyparty",
     .display_name ="Key Party",
     .version = "0.1.0",
