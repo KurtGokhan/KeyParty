@@ -545,6 +545,21 @@ static bool kioskEnabled() {
     return v.empty() || v == L"0";
 }
 
+// Diagnostic switch (off by default): set KEYPARTY_DIAG=1 to pop a one-time message
+// box after the page loads reporting whether the native bridge is present and which
+// frontend bundle actually loaded — used to tell a bridge/timing problem from a
+// stale-cache / stale-frontend one.
+static bool diagEnabled() {
+    wchar_t buf[8] = {};
+    DWORD n = GetEnvironmentVariableW(L"KEYPARTY_DIAG", buf, 8);
+    if (n == 0) return false;
+    std::wstring v(buf, n);
+    return !v.empty() && v != L"0";
+}
+
+// One-shot guard so the KEYPARTY_DIAG message box fires only once per launch.
+static bool g_diag_shown = false;
+
 // Quote + escape a wide string as a JSON string token.
 static std::wstring jsonQuote(const std::wstring &s) {
     static const wchar_t *hex = L"0123456789abcdef";
@@ -1045,7 +1060,17 @@ static void applyMainLoad(Host *host, Window &w) {
                                                    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
         }
         std::wstring entry = widen(w.asset_entry.empty() ? std::string("index.html") : w.asset_entry);
-        std::wstring url = std::wstring(kAssetBaseUrl) + entry;
+        // Cache-bust the top-level navigation with a per-launch token. WebView2 keeps
+        // a persistent disk cache under the user-data folder (shared across every
+        // build of this app the user has run); without this, a stale index.html from
+        // an earlier build can be served from cache — bypassing the new exe's embedded
+        // assets entirely, so native changes appear to have no effect. A unique query
+        // forces a cache miss → our WebResourceRequested handler serves the current
+        // blob. The handler strips the query before the asset lookup, and the fresh
+        // index.html references the current build's content-hashed chunks, so the
+        // whole app comes from the new binary. (Responses also carry no-store now.)
+        std::wstring sep = entry.find(L'?') == std::wstring::npos ? L"?" : L"&";
+        std::wstring url = std::wstring(kAssetBaseUrl) + entry + sep + L"_cb=" + std::to_wstring(GetTickCount64());
         w.main_webview->Navigate(url.c_str());
     } else if (w.load_kind == 0) {
         std::wstring html = widen(w.load_source);
@@ -1253,6 +1278,21 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 // the deferred initial show doesn't flash the desktop.
                                 auto wi = host->windows.find(window_id);
                                 if (wi != host->windows.end()) showHostWindow(wi->second);
+                                // KEYPARTY_DIAG=1: one-time report of the live bridge +
+                                // loaded-bundle state, so we can tell a bridge/timing
+                                // problem from a stale-cache one without guessing.
+                                if (diagEnabled() && !g_diag_shown && wi != host->windows.end() && wi->second.main_webview) {
+                                    g_diag_shown = true;
+                                    HWND dhwnd = wi->second.hwnd;
+                                    wi->second.main_webview->ExecuteScript(
+                                        LR"JS("kp="+(typeof window.keyparty)+" setBackdrop="+(window.keyparty?(typeof window.keyparty.setBackdrop):"NO_KEYPARTY")+" zero="+(typeof window.zero)+" glassBtn="+(!!document.querySelector(".btn-glass"))+" readyState="+document.readyState+" scripts="+Array.from(document.scripts).map(function(s){return (s.src||"inline").split("/").pop();}).join(","))JS",
+                                        Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+                                            [dhwnd](HRESULT, LPCWSTR result) -> HRESULT {
+                                                MessageBoxW(dhwnd, result ? result : L"(null)",
+                                                            L"KeyParty bridge diagnostic", MB_OK);
+                                                return S_OK;
+                                            }).Get());
+                                }
                                 BOOL ok = TRUE;
                                 args->get_IsSuccess(&ok);
                                 if (!ok) {
@@ -1322,7 +1362,10 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 ComPtr<IStream> stream;
                                 stream.Attach(SHCreateMemStream(data, (UINT)len));
                                 if (!stream) return S_OK;
-                                std::wstring headers = L"Content-Type: " + widen(mime) + L"\r\n";
+                                // no-store: never let WebView2's persistent disk cache
+                                // hold our embedded assets, so each launch serves the
+                                // current binary's frontend (not a stale earlier build).
+                                std::wstring headers = L"Content-Type: " + widen(mime) + L"\r\nCache-Control: no-store\r\n";
                                 ComPtr<ICoreWebView2WebResourceResponse> response;
                                 if (SUCCEEDED(env->CreateWebResourceResponse(stream.Get(), 200, L"OK", headers.c_str(), &response)) && response) {
                                     args->put_Response(response.Get());
