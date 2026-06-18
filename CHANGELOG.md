@@ -1,5 +1,11 @@
 # keyparty
 
+## 1.0.2
+
+### Patch Changes
+
+- f81d4e5: Give the macOS **.dmg** a branded install window instead of the bare default Finder folder: a light party-gradient backdrop with a "drag the keycap into your Applications folder" arrow, the app and Applications icons positioned over it, and the app's own icon as the disk's volume icon.
+
 ## 1.0.1
 
 ### Patch Changes
