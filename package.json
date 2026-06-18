@@ -1,6 +1,6 @@
 {
   "name": "keyparty",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "license": "MIT",
   "description": "Release tooling (Changesets) for the KeyParty app. The app itself lives in src/ (Zig) and frontend/ (Next.js).",
