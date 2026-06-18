@@ -314,7 +314,7 @@ html.kp-transparent .menu {
 
 html.kp-blurry .menu-card,
 html.kp-transparent .menu-card {
-  background: rgba(18, 8, 40, 0.5);
+  background: rgba(18, 8, 40, 0.92);
 }
 
 /* "transparent" = the raw desktop, sharp. Kill the UI's own backdrop blurs
