@@ -1,301 +1,100 @@
+<div align="center">
+
+<img src="assets/icon.svg" width="120" alt="KeyParty icon" />
+
 # KeyParty
 
-A **key-smashing game for kids**, built on zero-native (Zig native shell +
-Next.js web UI). Every key paints a different burst of color and plays a
-different sound. While playing it runs locked down in kiosk mode so a child can
-mash the whole keyboard without quitting the game, switching apps, or triggering
-anything in the operating system.
+**A key-smashing game for kids.**
 
-It ships as a desktop app for **macOS** and **Windows** (both lock the keyboard
-the same way), plus a browser version that plays the same but can't lock the
-keyboard.
+Every key paints a different splash of color and plays a different sound.
+While the game is running the keyboard is locked, so little hands can mash
+away to their heart's content without quitting the game, opening other apps,
+or changing anything on the computer.
 
-## Play
+<br />
 
-```sh
-zig build run
-```
+[**▶ Play in your browser**](http://gkurt.com/KeyParty/)
 
-The app opens in a small **menu** window with **Start** and **Quit** — and, on
-macOS, the one-time **Accessibility** setup needed for full keyboard locking
-(Windows needs no extra permission). Press **Start** to enter kiosk mode: the
-window takes over the **whole** screen — menu bar and dock on macOS, the taskbar
-on Windows — and the keyboard is locked. Smash any key, or click and drag with
-the mouse:
+<a href="https://github.com/KurtGokhan/KeyParty/releases/latest/download/KeyParty.dmg">
+  <img src="https://img.shields.io/badge/Download_for-macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" />
+</a>
+&nbsp;
+<a href="https://github.com/KurtGokhan/KeyParty/releases/latest/download/KeyParty.exe">
+  <img src="https://img.shields.io/badge/Download_for-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" />
+</a>
 
-- **Letters** — glowing letter + colored burst, a musical note per letter
-- **Numbers** — bouncing digit + star burst
-- **Space** — rainbow firework, a boom, and a screen shake
-- **Enter** — expanding rainbow ripple + a little chord
-- **Arrows** — a shooting stream of triangles + a swoop
-- **Backspace / Delete / Tab / Escape / punctuation** — their own shapes and tones
-- **Modifiers** — ⇧ Shift, ⌃ Control, ⌥ Option, ⌘ Command, Caps Lock and Fn each
-  get their own color, symbol, and chime. Pressing them (alone or as part of a
-  chord) still makes something happen instead of doing nothing.
-- **Clicks & drags** — paint colored splashes and trails at the pointer. The
-  cursor is a friendly glowing star you can always see.
+</div>
 
-### Leaving the game (grown-ups only)
+---
 
-While playing there is no quit button and no menu shortcut. The only way back is
-the four-key chord:
+## Screenshots
 
-> **Control + Option + Shift + Q**
+<!--
+Reserved for in-app images. Drop screenshots here once available —
+for example the menu and a few colorful bursts mid-game:
 
-It returns to the **menu** (it does not quit the app) — from there a grown-up can
-press **Quit**, or **Start** again. Every other key combination — ⌘Q, ⌘Tab,
-⌘Space (Spotlight), ⌘H, ⌘⌥Esc, the screenshot shortcuts, even the power/sleep and
-media keys — is swallowed before the system ever sees it, *and* still produces an
-on-screen effect. When a combo that would normally poke the OS is pressed, the
-game also briefly flashes a small hint showing the chord.
+<p align="center">
+  <img src="docs/screenshots/menu.png" width="45%" alt="Menu" />
+  <img src="docs/screenshots/gameplay.png" width="45%" alt="Gameplay" />
+</p>
+-->
 
-## Accessibility permission (macOS only, for full key blocking)
+_Coming soon._
 
-To swallow **every** system shortcut — including the ones the window server
-handles below any normal app (Spotlight, the screenshot keys, the power/sleep
-chord, media keys) — the game installs a global **CGEventTap**, which macOS only
-allows once the app is trusted for Accessibility. (Windows needs no such
-permission — its low-level keyboard hook works as soon as the app starts.)
+---
 
-The **menu** is where this is handled. If KeyParty isn't trusted yet, the menu
-shows a **Grant Accessibility Access…** button that opens the system prompt and
-jumps straight to **System Settings → Privacy & Security → Accessibility**. Turn
-KeyParty on there and come back — the menu polls for the grant and flips to
-"Keyboard lock ready" on its own, no restart needed. You can still press Start
-without it: the game falls back to an in-app monitor that blocks every app/menu
-shortcut (just not the window-server-level ones) and upgrades to the full tap the
-moment the grant lands.
+## How to play
 
-## How the lockdown works (macOS)
+Open KeyParty and press **Start**. The game fills the whole screen and the
+keyboard locks, so the only thing that happens is the fun. Now smash any key,
+or click and drag with the mouse:
 
-The kiosk behavior lives in a patched copy of the macOS native host,
-[`native/appkit_host.m`](native/appkit_host.m) (vendored from zero-native and
-wired up in [`build.zig`](build.zig)). The app opens at a small, ordinary titled
-window (the menu). The web UI drives the transitions over a tiny one-way bridge
-(`window.keyparty.{start,quit,requestAccessibility,checkAccessibility}`); status
-flows back as `keyparty:*` events on the existing `window.zero` event bus.
+- **Letters** — a glowing letter, a burst of color, and a musical note
+- **Numbers** — a bouncing digit and a shower of stars
+- **Space** — a rainbow firework, a big boom, and a little shake
+- **Enter** — an expanding rainbow ripple and a happy chord
+- **Arrows** — a shooting stream of triangles and a swoosh
+- **Other keys** — Backspace, Tab, Escape, punctuation and the rest all get
+  their own shapes and tones
+- **Special keys** — Shift, Control, Option/Alt, Command/Windows and Caps Lock
+  each get their own color, symbol, and chime, so nothing is ever a dud
+- **Clicks & drags** — paint colored splashes and trails wherever you point.
+  The cursor is a friendly glowing star you can always see.
 
-On **Start** (`-enterKiosk`) it:
+## Leaving the game (grown-ups only)
 
-- turns the menu window borderless and resizes it to cover the **entire** screen,
-  then raises it to `CGShieldingWindowLevel()` so it sits *above* the menu bar and
-  dock (the level screen savers use), non-movable;
-- sets `NSApplicationPresentationOptions` to hide the dock and menu bar and to
-  disable process switching (⌘Tab / Mission Control), force-quit (⌘⌥Esc), the
-  power-key session dialog, and app hiding (⌘H);
-- installs a **global CGEventTap** at the HID level that swallows every key-down,
-  key-up, and modifier change, plus the system-defined power/sleep/media events,
-  and forwards each one to the web UI so it still produces an effect — nothing a
-  child presses reaches another app or the OS;
-- falls back to an in-app key monitor when Accessibility hasn't been granted yet,
-  and auto-upgrades to the tap once it is.
+There's no quit button while the game is running — that's on purpose. To get
+back to the menu, hold down four keys at once:
 
-On the **Control + Option + Shift + Q** chord (`-exitKioskToMenu`) it reverses all
-of that — removes the tap, restores the dock/menu bar, and shrinks the window back
-to the centred menu — and emits `keyparty:menu` so the UI shows the menu again.
-The menu's Quit button (`-handleKeyPartyControlCommand:`) is what shuts the app
-down. The menu's Quit / Close / Hide key-equivalents are also stripped as another
-layer of defense.
+> **Control + Option + Shift + Q**  (on Windows: **Control + Alt + Shift + Q**)
 
-The game UI (the menu, canvas, effects, sounds, pointer splashes, custom cursor,
-the on-screen hint) is in [`frontend/app/page.tsx`](frontend/app/page.tsx). It
-consumes the native `key` events the tap forwards, and also handles plain DOM
-keys (for development / browser use), calling `preventDefault()` so the web layer
-never scrolls, quick-finds, or moves focus.
+That returns you to the menu, where a grown-up can press **Quit** or start
+playing again. Every other shortcut a child might stumble onto is caught by the
+game and turned into more color and sound instead of doing anything to the
+computer.
 
-## How the lockdown works (Windows)
+## A note for Mac users
 
-Windows uses a patched copy of zero-native's WebView2 host,
-[`native/webview2_host.cpp`](native/webview2_host.cpp). The upstream host only
-opened a bare window, so this copy also adds the main-window WebView2 (serving the
-embedded frontend), the same `window.zero` / `window.keyparty` bridge as macOS, and
-the kiosk lockdown. The **shared web UI is unchanged** — it sees the same bridge
-events on both platforms.
+The first time you play on a Mac, KeyParty asks for a one-time permission so it
+can fully lock the keyboard. The menu has a **Grant Accessibility Access…**
+button that takes you straight to the right setting — switch KeyParty on, come
+back, and you're ready. You can start playing before granting it, too; the game
+just locks a little less tightly until you do. (Windows needs no setup.)
 
-The Windows build is a **single self-contained `keyparty.exe`**: the frontend is
-embedded in the executable (a build step packs `frontend/out` into a byte blob —
-see [`scripts/embed-assets.mjs`](scripts/embed-assets.mjs) — which the host serves
-from memory over `WebResourceRequested`), and the WebView2 loader is statically
-linked, so there's no `WebView2Loader.dll` and no `resources/` folder to ship.
+## Links
 
-On **Start** it:
+- 🌐 **Website & browser version:** http://gkurt.com/KeyParty/
+- ⬇️ **All downloads:** [Releases](https://github.com/KurtGokhan/KeyParty/releases/latest)
 
-- makes the menu window borderless + topmost and resizes it to cover the whole
-  monitor, the taskbar included;
-- installs a global **low-level keyboard hook** (`WH_KEYBOARD_LL`) that swallows
-  every key — Win, Alt+Tab, Alt+Esc, Alt+F4, Ctrl+Esc, F5/refresh, and the rest —
-  and forwards each one to the web UI as a synthetic `key` event, so it still
-  produces an on-screen effect while never reaching another app or the OS;
-- detects the grown-up **Control + Alt + Shift + Q** chord and returns to the menu.
+## License
 
-The one shortcut Windows will not let any app intercept is **Ctrl + Alt + Del**
-(the Secure Attention Sequence) — blocking it needs the OS Assigned Access / kiosk
-policy, which is outside the app.
+KeyParty is open source under the [MIT License](LICENSE).
 
-The exe still needs the **WebView2** Evergreen *runtime* installed (it ships with
-Windows 11 and current Windows 10); only the loader is linked in, not the runtime
-itself.
+---
 
-### Development mode
+<div align="center">
 
-Run with the screen takeover and keyboard lock disabled for development:
+Want to build KeyParty yourself or help out?
+See [DEVELOPMENT.md](DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
-```sh
-KEYPARTY_NO_KIOSK=1 zig build run
-```
-
-The menu and Start/Quit still work; pressing Start just plays in the normal
-window (no full-screen, no keyboard grab), and the **Control + Option + Shift + Q**
-chord still returns to the menu — handled by the DOM key path in the web UI.
-
-## Setup
-
-The zero-native framework is a normal dependency, so install it (and the release
-tooling) from the repo root, then let the build pull in the frontend deps:
-
-```sh
-npm install   # installs node_modules/zero-native + its CLI, and Changesets
-```
-
-`zig build dev`, `zig build run`, and `zig build package` also install the
-frontend deps automatically (`npm install --prefix frontend`).
-
-The build reads the framework from `node_modules/zero-native` (anchored at the
-repo root) by default — override with `-Dzero-native-path=/path/to/zero-native`
-to use a different checkout. The patched native hosts
-([`native/appkit_host.m`](native/appkit_host.m),
-[`native/webview2_host.cpp`](native/webview2_host.cpp)) ship in this repo, so
-only the rest of the framework comes from that path.
-
-`zig build dev` and `zig build package` shell out to the `zero-native` CLI, which
-`npm install` puts in `node_modules/.bin`. Run those via `npx zig build …` (or
-add `node_modules/.bin` to your `PATH`) so the CLI resolves — or install it
-globally with `npm i -g zero-native@0.2.0`.
-
-On **Windows**, the kiosk host ([`native/webview2_host.cpp`](native/webview2_host.cpp))
-is compiled with **MSVC's `cl.exe`**, not Zig's bundled clang — the WebView2/WRL
-(`wrl.h`) headers are MSVC-flavored and Zig's libc++ can't target the MSVC C++
-ABI. The build produces a **single self-contained `keyparty.exe`** (the frontend
-is embedded and the WebView2 loader is static-linked), so it needs both the
-WebView2 SDK headers and the static loader lib. Build from an *x64 Native Tools
-Command Prompt* (which puts `cl.exe` and the Windows SDK on `PATH`/`%INCLUDE%`):
-
-```sh
-zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseFast ^
-  -Dwebview2-include="C:\path\to\Microsoft.Web.WebView2\build\native\include" ^
-  -Dwebview2-lib-dir="C:\path\to\Microsoft.Web.WebView2\build\native\x64"
-```
-
-The result is `zig-out\bin\keyparty.exe` — one file, no DLL, no `resources\`
-folder. `cl.exe` resolves the Windows SDK, `winrt` (`wrl.h`), and STL headers from
-`%INCLUDE%` on its own (`-Dwinrt-include=...` is accepted but rarely needed).
-Omitting `-Dwebview2-include` makes the host compile to a blank-window stub (it
-says so at launch); omitting `-Dwebview2-lib-dir` fails the link. The embed step
-runs Node, so building also (re)builds the frontend. The WebView2 Evergreen
-runtime must be installed to run (it is on Windows 11 / current Windows 10).
-
-### Testing a Windows build without a local toolchain
-
-Don't want to install MSVC? Run the **Windows build (test)** workflow
-([`.github/workflows/windows-build.yml`](.github/workflows/windows-build.yml))
-from the repo's **Actions** tab — or just push a change under `native/`,
-`build.zig`, `app.zon`, or `frontend/` and it runs automatically. Download the
-**keyparty-windows** artifact, unzip it, and run **`KeyParty.exe`** — it's a
-single self-contained file (frontend embedded, loader static-linked). No release
-needed.
-
-## Commands
-
-```sh
-zig build run       # build the frontend + launch the game
-zig build dev       # frontend dev server + native shell
-zig build test      # run tests
-zig build package   # create a distributable .app
-zero-native doctor --manifest app.zon
-```
-
-Diagnostics:
-
-- Set `ZERO_NATIVE_LOG_DIR` to override the log directory during development.
-- Set `ZERO_NATIVE_LOG_FORMAT=text|jsonl` to choose the persistent log format.
-
-## Releasing
-
-Versioning and releases run on [Changesets](https://github.com/changesets/changesets).
-
-1. With each change worth shipping, add a changeset and commit it:
-   ```sh
-   npx changeset
-   ```
-2. On push to `main`, the [Release workflow](.github/workflows/release.yml) opens
-   (or updates) a **"Version Packages"** PR. Merging it bumps the version,
-   updates `CHANGELOG.md`, syncs that version into `app.zon`, `build.zig.zon`,
-   and `frontend/package.json` (via [`scripts/sync-version.mjs`](scripts/sync-version.mjs)),
-   tags the release (`keyparty@x.y.z`), and creates a GitHub Release.
-3. The same workflow then builds the apps on two runners and uploads both to the
-   release:
-   - **macOS** — `KeyParty.dmg` (a drag-to-Applications disk image holding
-     `Key Party.app`, built from `zig build package`). **Signed (Developer ID) and
-     notarized** when the signing secrets are configured (see [Code signing](#code-signing)
-     below) — it then launches with no Gatekeeper prompt. Without those secrets it
-     ships **unsigned**, so first launch needs right-click → Open (or clearing the
-     quarantine flag).
-   - **Windows** — `KeyParty.exe`, a single self-contained file
-     (frontend embedded, WebView2 loader static-linked), via `zig build` against
-     the WebView2 SDK headers + static loader lib (restored from NuGet). Currently
-     **unsigned** (signing is scaffolded but inert — see [Code signing](#code-signing)
-     below), so SmartScreen shows a "More info → Run anyway" prompt on first launch;
-     the WebView2 Evergreen runtime must be present (it is on Windows 11 and current
-     Windows 10).
-
-One-time repo setup:
-
-- **Settings → Pages → Source: GitHub Actions** (for the web build).
-- **Settings → Actions → General → Workflow permissions:** allow GitHub Actions
-  to **create and approve pull requests** (so the version PR can be opened).
-
-### Code signing
-
-Signing is wired into the [Release workflow](.github/workflows/release.yml) as
-**post-build steps gated on secrets** — local `zig build` always produces
-unsigned binaries, and CI signs only when the relevant secrets exist, so the
-pipeline keeps working before any certificate is in place.
-
-**macOS — Developer ID + notarization.** Once the Apple Developer Program
-membership is active:
-
-1. In **Keychain Access → Certificate Assistant → Request a Certificate from a
-   Certificate Authority…**, generate a CSR. In the
-   [Apple Developer portal](https://developer.apple.com/account/resources/certificates)
-   create a **Developer ID Application** certificate from that CSR, download it,
-   double-click to add it to your keychain, then export it *with its private key*
-   as a `.p12`.
-2. Create an **App Store Connect API key** (Users and Access → Integrations →
-   Keys, role *Developer*) for notarization. Record the **Key ID** and **Issuer
-   ID**, and download the `.p8` (one chance only).
-3. Add these repository secrets (Settings → Secrets and variables → Actions):
-
-   | Secret | Value |
-   | --- | --- |
-   | `MACOS_CERTIFICATE` | the `.p12`, base64-encoded (`base64 -i cert.p12 \| pbcopy`) |
-   | `MACOS_CERTIFICATE_PWD` | the password set when exporting the `.p12` |
-   | `MACOS_SIGN_IDENTITY` | e.g. `Developer ID Application: Your Name (TEAMID)` |
-   | `APPLE_NOTARY_KEY` | the `.p8`, base64-encoded |
-   | `APPLE_NOTARY_KEY_ID` | the API Key ID |
-   | `APPLE_NOTARY_ISSUER` | the Issuer ID (a UUID) |
-
-   With all six set, the next release signs `Key Party.app` with the Hardened
-   Runtime ([`assets/keyparty.entitlements`](assets/keyparty.entitlements)), signs
-   and notarizes the `.dmg`, and staples the ticket so it opens with no Gatekeeper
-   prompt. Set just the first three to sign without notarizing (Gatekeeper still
-   warns). WKWebView runs JavaScript in the Apple-signed system WebKit process, so
-   the host needs no JIT/unsigned-memory entitlements.
-
-**Windows — unsigned for now (scaffolded).** The release workflow has an inert
-`Sign the Windows exe` step that activates once a `WINDOWS_SIGN_CERT` secret is
-set and a real signing command is dropped into it. Since June 2023 every
-publicly-trusted Windows code-signing certificate must keep its key on hardware
-or a cloud service, so the practical CI-friendly routes are **Microsoft Trusted
-Signing** (~$10/mo, cheapest), **DigiCert KeyLocker**, or **SSL.com eSigner** —
-not a plain `.pfx`. Until then the exe ships unsigned and SmartScreen shows a
-"More info → Run anyway" prompt on first launch.
+</div>
