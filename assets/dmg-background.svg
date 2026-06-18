@@ -1,0 +1,76 @@
+<svg width="660" height="400" viewBox="0 0 660 400" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    Install-window backdrop for KeyParty.dmg. Coordinates are tuned for a
+    660x400 Finder window with 128px icons: the app icon lands at (180,185)
+    and the Applications drop-link at (480,185) - see scripts/make-dmg.sh.
+    Keep those two zones uncluttered so the real icons read cleanly on top.
+    Edit here, then re-render with: scripts/make-dmg.sh background
+  -->
+  <defs>
+    <!-- Very light party gradient: pink -> lavender-white -> lavender -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fdeffa"/>
+      <stop offset="0.5" stop-color="#f7f2ff"/>
+      <stop offset="1" stop-color="#ece4ff"/>
+    </linearGradient>
+    <!-- Faint warm bloom up top, just enough to lift the title -->
+    <radialGradient id="glow" cx="0.5" cy="0.28" r="0.7">
+      <stop offset="0" stop-color="#ffd23f" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ff7ad9" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff4fb8"/>
+      <stop offset="0.55" stop-color="#ff7a3d"/>
+      <stop offset="1" stop-color="#ffb02e"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+
+  <!-- Backdrop -->
+  <rect width="660" height="400" fill="url(#bg)"/>
+  <rect width="660" height="400" fill="url(#glow)"/>
+
+  <!-- Confetti, kept to the corners and edges so the icon zones stay clean -->
+  <g>
+    <circle cx="48" cy="58" r="9" fill="#ff5d8f"/>
+    <circle cx="612" cy="66" r="8" fill="#23c4cc"/>
+    <circle cx="40" cy="330" r="9" fill="#43c95f"/>
+    <circle cx="624" cy="320" r="10" fill="#f5a623"/>
+    <circle cx="330" cy="356" r="7" fill="#5ea0ff"/>
+    <rect x="92" y="120" width="18" height="18" rx="5" transform="rotate(20 101 129)" fill="#ff9b3f"/>
+    <rect x="560" y="128" width="16" height="16" rx="4" transform="rotate(-18 568 136)" fill="#a78bfa"/>
+    <rect x="120" y="280" width="17" height="17" rx="4" transform="rotate(25 128 288)" fill="#ff6bd6"/>
+    <rect x="540" y="276" width="16" height="16" rx="4" transform="rotate(-22 548 284)" fill="#23c4cc"/>
+    <circle cx="600" cy="200" r="6" fill="#ff6bd6"/>
+    <circle cx="58" cy="196" r="6" fill="#f5a623"/>
+  </g>
+
+  <!-- Title + instruction -->
+  <text x="330" y="58" text-anchor="middle"
+        font-family="Avenir Next, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="38" font-weight="700" fill="#3a1d6e">Key Party</text>
+  <text x="330" y="88" text-anchor="middle"
+        font-family="Avenir Next, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="16" font-weight="500" fill="#6b4a9e">Drag the keycap into your Applications folder</text>
+
+  <!-- Drop-target hint ring behind the Applications icon -->
+  <rect x="408" y="113" width="144" height="144" rx="26"
+        fill="#7c3aed" fill-opacity="0.05"
+        stroke="#7c3aed" stroke-opacity="0.5" stroke-width="2"
+        stroke-dasharray="7 9"/>
+
+  <!-- Glowing arrow: app  ->  Applications -->
+  <path d="M256 174 L358 174 L358 154 L406 185 L358 216 L358 196 L256 196 Z"
+        fill="url(#arrow)" filter="url(#soft)" opacity="0.55"/>
+  <path d="M256 174 L358 174 L358 154 L406 185 L358 216 L358 196 L256 196 Z"
+        fill="url(#arrow)"/>
+
+  <!-- Sparkles around the arrow -->
+  <g fill="#ff8a3d">
+    <path d="M300 132 l4 11 11 4 -11 4 -4 11 -4 -11 -11 -4 11 -4 Z" opacity="0.9"/>
+    <path d="M360 244 l3 9 9 3 -9 3 -3 9 -3 -9 -9 -3 9 -3 Z" opacity="0.8"/>
+  </g>
+</svg>

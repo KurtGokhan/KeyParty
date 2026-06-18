@@ -163,16 +163,13 @@ jobs:
             --sign "$MACOS_SIGN_IDENTITY" "$APP"
           codesign --verify --strict --verbose=2 "$APP"
 
-      - name: Build a .dmg (drag-to-Applications)
-        run: |
-          APP="$(ls -d zig-out/package/*.app | head -n1)"
-          # Stage the bundle under its display name with an Applications shortcut,
-          # so the mounted disk image is a familiar drag-to-install window.
-          STAGE="dmg-stage"
-          rm -rf "$STAGE" && mkdir -p "$STAGE"
-          cp -R "$APP" "$STAGE/Key Party.app"
-          ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname "Key Party" -srcfolder "$STAGE" -ov -format UDZO "KeyParty.dmg"
+      - name: Build a .dmg (branded, drag-to-Applications)
+        # Same script used for local testing (scripts/make-dmg.sh), so the
+        # install window here is identical to what you preview on a Mac. It
+        # picks up the already-signed .app from zig-out/package, lays it out
+        # over the branded backdrop next to an Applications drop-link, and
+        # sets the volume icon. Signing/notarization happens in the next step.
+        run: scripts/make-dmg.sh
 
       - name: Sign & notarize the .dmg
         if: ${{ env.MACOS_CERTIFICATE != '' }}

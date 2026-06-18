@@ -7,3 +7,6 @@ zig-out/
 
 .DS_Store
 dist/
+
+# Built disk image (produced by scripts/make-dmg.sh)
+KeyParty.dmg
