@@ -146,6 +146,11 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @property(nonatomic, assign) CFMachPortRef eventTap;
 @property(nonatomic, assign) CFRunLoopSourceRef eventTapSource;
 @property(nonatomic, assign) CGEventFlags previousFlags;
+// Physical key codes of the non-modifier keys currently held down (the tap sees
+// every keyDown/keyUp, so this stays accurate). Modifiers and Caps Lock arrive
+// as flagsChanged, never keyDown, so they never land here — which is exactly
+// what the quit chord's "no other key held" rule needs.
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *heldKeyCodes;
 @property(nonatomic, strong) NSTimer *accessibilityRetryTimer;
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, assign) zero_native_appkit_tray_callback_t trayCallback;
@@ -405,6 +410,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     self.windowLabels = [[NSMutableDictionary alloc] init];
     self.childWebViews = [[NSMutableDictionary alloc] init];
     self.bridgeEnabledChildWebViewKeys = [[NSMutableSet alloc] init];
+    self.heldKeyCodes = [[NSMutableSet alloc] init];
     self.allowedNavigationOrigins = @[ @"zero://app", @"zero://inline" ];
     self.allowedExternalURLs = @[];
     self.externalLinkAction = 0;
@@ -1685,6 +1691,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     self.eventTap = tap;
     self.eventTapSource = source;
     self.previousFlags = 0;
+    [self.heldKeyCodes removeAllObjects];
     return YES;
 }
 
@@ -1699,6 +1706,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         CFRelease(self.eventTap);
         self.eventTap = NULL;
     }
+    [self.heldKeyCodes removeAllObjects];
 }
 
 - (void)startAccessibilityRetry {
@@ -1751,7 +1759,6 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     BOOL ctrl = (flags & NSEventModifierFlagControl) != 0;
     BOOL opt = (flags & NSEventModifierFlagOption) != 0;
     BOOL shift = (flags & NSEventModifierFlagShift) != 0;
-    NSString *key = event.charactersIgnoringModifiers.lowercaseString ?: @"";
 
     uint64_t windowId = 1;
     NSWindow *window = event.window ?: NSApp.keyWindow;
@@ -1762,9 +1769,14 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         }
     }
 
-    // Grown-up chord: Control + Option + Shift + Q, detected on the Q key-down
-    // while the three modifiers are held. Leaves the kiosk back to the menu.
-    if (ctrl && opt && shift && !cmd && [key isEqualToString:@"q"]) {
+    // Grown-up chord: Control + Option + Shift held (all three) + Q, with no
+    // Command, detected on the Q key-down. Leaves the kiosk back to the menu.
+    // Matching on the physical key code (Q == 12) rather than the produced
+    // character keeps it working with Caps Lock on or on non-US layouts, where
+    // charactersIgnoringModifiers can differ. (This fallback monitor doesn't
+    // swallow plain keys, so it can't track which other keys are held — the
+    // global tap path enforces the "nothing else held" rule.)
+    if (ctrl && opt && shift && !cmd && event.keyCode == 12) {
         [self exitKioskToMenu];
         return YES;
     }
@@ -1953,15 +1965,26 @@ static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType 
         CGKeyCode keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
         BOOL repeat = CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) != 0;
 
-        // Grown-up chord: Control + Option + Shift + Q (physical Q == 12) leaves
-        // the kiosk and returns to the menu (it no longer quits the app).
-        if (ctrl && alt && shift && !cmd && keyCode == 12) {
+        // Grown-up chord: Control + Option + Shift held (all three) + Q (physical
+        // Q == 12), with no Command and no other key held at the same time,
+        // leaves the kiosk and returns to the menu (it no longer quits the app).
+        // Command is excluded — it carries too many system meanings (Cmd+Q etc.)
+        // to belong in a kid-proof chord, so it blocks like any other key.
+        // Modifiers and Caps Lock never enter heldKeyCodes (they come as
+        // flagsChanged), so the "nothing else held" test ignores them — Caps Lock
+        // can't block the chord.
+        BOOL onlyQHeld = YES;
+        for (NSNumber *held in host.heldKeyCodes) {
+            if (held.unsignedShortValue != 12) { onlyQHeld = NO; break; }
+        }
+        if (ctrl && alt && shift && !cmd && keyCode == 12 && onlyQHeld) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 [host exitKioskToMenu];
             });
             return NULL;
         }
 
+        [host.heldKeyCodes addObject:@(keyCode)];
         NSEvent *ns = nil;
         @try { ns = [NSEvent eventWithCGEvent:event]; } @catch (NSException *e) { (void)e; ns = nil; }
         NSString *chars = ns.charactersIgnoringModifiers ?: @"";
@@ -1977,6 +2000,7 @@ static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType 
         // Still swallowed, but forward the release so the game can stop driving
         // this key's repeat (it tracks every held key itself).
         CGKeyCode keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+        [host.heldKeyCodes removeObject:@(keyCode)];
         NSEvent *ns = nil;
         @try { ns = [NSEvent eventWithCGEvent:event]; } @catch (NSException *e) { (void)e; ns = nil; }
         NSString *chars = ns.charactersIgnoringModifiers ?: @"";

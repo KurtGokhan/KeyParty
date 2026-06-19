@@ -702,6 +702,21 @@ static void emitAccessibilityStatus(Host *host) {
     emitMainEvent(host, L"keyparty:accessibility", detail);
 }
 
+// Modifier and lock keys (incl. Caps Lock) — these never count as "another key"
+// for the quit chord's "nothing else held" rule.
+static bool isModifierOrLockVk(DWORD vk) {
+    switch (vk) {
+        case VK_LCONTROL: case VK_RCONTROL: case VK_CONTROL:
+        case VK_LMENU:    case VK_RMENU:    case VK_MENU:
+        case VK_LSHIFT:   case VK_RSHIFT:   case VK_SHIFT:
+        case VK_LWIN:     case VK_RWIN:
+        case VK_CAPITAL:  case VK_NUMLOCK:  case VK_SCROLL:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // The global keyboard tap: swallows every key system-wide and forwards it to the
 // UI, plus drives the grown-up quit chord. Installed only while in kiosk.
 static LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -731,8 +746,20 @@ static LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
             auto it = g_kiosk_host->windows.find(1);
             if (it != g_kiosk_host->windows.end()) hwnd = it->second.hwnd;
 
-            // Grown-up chord: Control + Alt + Shift + Q -> back to the menu.
-            if (down && ctrl && alt && shift && !meta && vk == 'Q') {
+            // Grown-up chord: Control + Alt + Shift held (all three) + Q, with no
+            // Win key and no other key held -> back to the menu. Win is excluded
+            // because it triggers OS shortcuts; it blocks like any other
+            // disallowed key. g_held_vks already includes this Q (inserted above).
+            // Caps Lock and the modifiers are skipped by isModifierOrLockVk, so
+            // neither blocks the chord.
+            bool otherKeyHeld = false;
+            for (DWORD held_vk : g_held_vks) {
+                if (held_vk != 'Q' && !isModifierOrLockVk(held_vk)) {
+                    otherKeyHeld = true;
+                    break;
+                }
+            }
+            if (down && ctrl && alt && shift && !meta && vk == 'Q' && !otherKeyHeld) {
                 if (hwnd) PostMessageW(hwnd, WM_KEYPARTY_EXIT, 0, 0);
                 return 1;
             }

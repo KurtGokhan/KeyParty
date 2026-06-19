@@ -15,9 +15,10 @@ import { trackEvent } from "./analytics";
  * still make something happen on screen. Clicks and drags paint too.
  *
  * Every key makes a different splash of color and a different sound. The
- * grown-up chord — Control + Option + Shift + Q — leaves the game and returns
- * to the menu (the native tap drives it in kiosk; the DOM path below handles
- * it in plain-browser / KEYPARTY_NO_KIOSK dev mode).
+ * grown-up chord — Control + Option + Shift (all three) + Q, with no Command and
+ * no other key down — leaves the game and returns to the menu (the native tap
+ * drives it in kiosk; the DOM path below handles it in plain-browser /
+ * KEYPARTY_NO_KIOSK dev mode).
  * ------------------------------------------------------------------ */
 
 type Mode = "menu" | "playing";
@@ -881,8 +882,20 @@ export default function Home() {
       // The game owns every keystroke — no scrolling, quick-find, or focus moves.
       e.preventDefault();
       // Grown-up chord (browser / KEYPARTY_NO_KIOSK dev path, where there's no
-      // native tap to catch it): Control + Option + Shift + Q returns to the menu.
-      if (e.ctrlKey && e.altKey && e.shiftKey && !e.metaKey && e.code === "KeyQ") {
+      // native tap to catch it): Control + Option + Shift held (all three) + Q,
+      // with no Command and no other key down, returns to the menu. Command is
+      // excluded — too many system meanings to belong in a kid-proof chord.
+      // Matching on e.code keeps it working with Caps Lock on; Caps Lock never
+      // enters heldKeys, so it can't block. heldKeys holds only non-modifier
+      // keys, so an empty map means "nothing else is down".
+      if (
+        e.ctrlKey &&
+        e.altKey &&
+        e.shiftKey &&
+        !e.metaKey &&
+        e.code === "KeyQ" &&
+        heldKeys.size === 0
+      ) {
         engineRef.current?.returnToMenu();
         return;
       }
@@ -1359,6 +1372,13 @@ export default function Home() {
   const showAccess = hasNative === true && accessibility?.kioskEnabled;
   const showWebNote = isWeb;
 
+  // The quit chord's modifier names follow the host OS: Windows users know them
+  // as Ctrl + Alt, macOS as Control + Option. (os is null until mount; default
+  // to the macOS wording.) The keys are the same — only the labels differ.
+  const quitMods = os === "windows"
+    ? (["Ctrl", "Alt", "Shift"] as const)
+    : (["Control", "Option", "Shift"] as const);
+
   return (
     <div className={mode === "menu" ? "stage stage-menu" : "stage"}>
       <div ref={fxRef} className="fx-layer" aria-hidden="true" />
@@ -1369,7 +1389,7 @@ export default function Home() {
         <small>🎹 🌈 🎉 — or click and drag</small>
       </div>
       <div ref={hintRef} className="hint">
-        Grown-ups: hold <kbd>Control</kbd> + <kbd>Option</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> to go back to the menu
+        Grown-ups: hold <kbd>{quitMods[0]}</kbd> + <kbd>{quitMods[1]}</kbd> + <kbd>{quitMods[2]}</kbd> + <kbd>Q</kbd> to go back to the menu
       </div>
 
       {mode === "menu" && (
@@ -1469,7 +1489,7 @@ export default function Home() {
             )}
 
             <p className="menu-foot">
-              While playing, press <kbd>Control</kbd>+<kbd>Option</kbd>+<kbd>Shift</kbd>+
+              While playing, press <kbd>{quitMods[0]}</kbd>+<kbd>{quitMods[1]}</kbd>+<kbd>{quitMods[2]}</kbd>+
               <kbd>Q</kbd> to return here.
             </p>
 
