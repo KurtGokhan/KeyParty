@@ -2089,6 +2089,11 @@ static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType 
                 [host forwardKeyToGameWithCode:code key:key repeat:NO ctrl:ctrl alt:alt meta:cmd shift:shift];
             });
         }
+        // Fn/Globe (keycode 63) is swallowed: a double-tap is the default
+        // Dictation trigger, so letting it reach the system would open Dictation
+        // mid-game. The game effect above still fires; we just drop the OS event.
+        // Other modifiers pass through so their flag state stays in sync.
+        if (keyCode == 63) return NULL;
         return event;
     }
 
