@@ -36,6 +36,17 @@ extern CGEventFlags CGEventGetFlags(CGEventRef event);
 extern int64_t CGEventGetIntegerValueField(CGEventRef event, uint32_t field);
 extern int32_t CGShieldingWindowLevel(void);
 
+// KeyParty: keep the cursor inside the kiosk display. We read/rewrite the mouse
+// event location in the tap and warp the hardware cursor back when it strays.
+// Spelled over already-visible geometry types (CGPoint/CGRect) and underlying
+// integer types so clang doesn't auto-import the uncompilable QuickDraw module.
+extern CGPoint CGEventGetLocation(CGEventRef event);
+extern void CGEventSetLocation(CGEventRef event, CGPoint location);
+extern int32_t CGWarpMouseCursorPosition(CGPoint newCursorPosition);
+extern int32_t CGAssociateMouseAndMouseCursorPosition(int connected);
+extern CGRect CGDisplayBounds(uint32_t display);
+extern uint32_t CGMainDisplayID(void);
+
 // kCGHeadInsertEventTap and kCGEventTapOptionDefault already leak in via
 // CGEventTypes.h, but kCGHIDEventTapLocation does not; define just that one (it
 // is the first CGEventTapLocation value). Defining it here also stops clang from
@@ -51,6 +62,10 @@ static const NSUInteger ZeroNativeMaxChildWebViews = 16;
 // to keep the game in a normal window when Start is pressed (useful for dev).
 static const CGFloat ZeroNativeKeyPartyMenuWidth = 760;
 static const CGFloat ZeroNativeKeyPartyMenuHeight = 560;
+// KeyParty: in kiosk the cursor is pinned to the game's display, kept this many
+// pixels inside every edge so it never reaches the very last row/column where a
+// hidden menu-bar strip or an adjacent monitor would otherwise be reachable.
+static const CGFloat ZeroNativeKeyPartyCursorPadding = 40.0;
 static BOOL ZeroNativeKeyPartyKioskEnabled(void);
 // KeyParty: JS-side shim (window.keyparty.start/quit/…) injected at document
 // start so the menu can drive kiosk entry/exit. Defined below.
@@ -160,6 +175,11 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 @property(nonatomic, strong) ZeroNativeKeyPartyControlHandler *keyPartyControlHandler;
 @property(nonatomic, assign) BOOL kioskActive;
 @property(nonatomic, assign) NSRect windowedFrame;
+// KeyParty: cursor confinement (kiosk only). cursorConfineRect is the allowed
+// area in global display (CG) coordinates — the game's display grown by the
+// padding band; the tap warps the cursor back inside whenever it escapes.
+@property(nonatomic, assign) BOOL cursorConfineActive;
+@property(nonatomic, assign) CGRect cursorConfineRect;
 // KeyParty: optional see-through background, driven from the menu via
 // window.keyparty.setBackdrop(mode). Modes: "solid" (opaque deep-purple chrome),
 // "blurry" and "transparent" — both make the window non-opaque so the real
@@ -1542,6 +1562,19 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         // visible frame.
         rect = NSInsetRect(rect, -2.0, -2.0);
     }
+
+    // Pin the cursor to this display so it can't wander off the game view (onto a
+    // second monitor, the menu bar strip, etc.). CGDisplayBounds is in the same
+    // global coordinate space as the tap's event locations, so no flip math is
+    // needed; shrink it by the padding band so the cursor stops just inside every
+    // edge rather than on the last pixel. Enforced by the tap.
+    NSNumber *screenNumber = screen.deviceDescription[@"NSScreenNumber"];
+    uint32_t displayID = screenNumber ? (uint32_t)screenNumber.unsignedIntValue : CGMainDisplayID();
+    self.cursorConfineRect = CGRectInset(CGDisplayBounds(displayID),
+                                         ZeroNativeKeyPartyCursorPadding,
+                                         ZeroNativeKeyPartyCursorPadding);
+    self.cursorConfineActive = YES;
+
     self.kioskActive = YES; // gate -applyKioskPresentation before calling it
 
     // Borderless + shield level so the window covers the ENTIRE screen, menu bar
@@ -1583,6 +1616,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 - (void)exitKioskToMenu {
     if (!self.kioskActive) return;
     self.kioskActive = NO;
+    self.cursorConfineActive = NO; // let the cursor roam the menu / other monitors again
 
     // Release the keyboard lockdown so the menu is fully operable again.
     [self removeGlobalEventTap];
@@ -1669,6 +1703,12 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) |
                        CGEventMaskBit(kCGEventKeyUp) |
                        CGEventMaskBit(kCGEventFlagsChanged) |
+                       // Mouse motion (incl. dragging) so the kiosk can keep the
+                       // cursor pinned to the game's display.
+                       CGEventMaskBit(kCGEventMouseMoved) |
+                       CGEventMaskBit(kCGEventLeftMouseDragged) |
+                       CGEventMaskBit(kCGEventRightMouseDragged) |
+                       CGEventMaskBit(kCGEventOtherMouseDragged) |
                        CGEventMaskBit((CGEventType)NSEventTypeSystemDefined);
 
     CFMachPortRef tap = CGEventTapCreate(kCGHIDEventTapLocation,
@@ -1952,6 +1992,30 @@ static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType 
     // The system disables a tap that runs too long or on certain input; re-arm.
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
         if (host.eventTap) CGEventTapEnable(host.eventTap, true);
+        return event;
+    }
+
+    // Keep the cursor inside the game's display. Clamp the reported location and,
+    // when it had escaped, warp the hardware cursor back. Re-associating right
+    // after the warp cancels the post-warp event-suppression window so motion
+    // stays smooth instead of the cursor briefly freezing at the edge.
+    if (host.cursorConfineActive &&
+        (type == kCGEventMouseMoved ||
+         type == kCGEventLeftMouseDragged ||
+         type == kCGEventRightMouseDragged ||
+         type == kCGEventOtherMouseDragged)) {
+        CGRect r = host.cursorConfineRect;
+        CGPoint loc = CGEventGetLocation(event);
+        CGFloat maxX = CGRectGetMaxX(r) - 1.0;
+        CGFloat maxY = CGRectGetMaxY(r) - 1.0;
+        CGFloat cx = loc.x < r.origin.x ? r.origin.x : (loc.x > maxX ? maxX : loc.x);
+        CGFloat cy = loc.y < r.origin.y ? r.origin.y : (loc.y > maxY ? maxY : loc.y);
+        if (cx != loc.x || cy != loc.y) {
+            CGPoint clamped = CGPointMake(cx, cy);
+            CGEventSetLocation(event, clamped);
+            CGWarpMouseCursorPosition(clamped);
+            CGAssociateMouseAndMouseCursorPosition(1);
+        }
         return event;
     }
 

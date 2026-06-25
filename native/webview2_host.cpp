@@ -74,6 +74,10 @@ using Microsoft::WRL::ComPtr;
 // open the window at the same size.
 static const LONG kMenuWidth = 760;
 static const LONG kMenuHeight = 560;
+// KeyParty: in kiosk the cursor is clipped to the game's monitor, kept this many
+// pixels inside every edge so it stops just short of the last pixel column where
+// the taskbar or an adjacent monitor would otherwise be reachable.
+static const int kCursorPadding = 40;
 // Deep-purple window chrome matching the game stage (#0b0420). RGB() packs it
 // into a COLORREF (0x00BBGGRR) for both the title bar and the class background.
 static const COLORREF kFrameColor = RGB(0x0b, 0x04, 0x20);
@@ -782,6 +786,20 @@ static LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
+// Pin the cursor to the kiosk window's monitor so it can't wander off the game
+// view (onto a second monitor, the taskbar, etc.). Windows drops the clip when
+// the window loses focus, so this is reapplied on WM_SETFOCUS while in kiosk.
+static void applyKioskCursorClip(Window &w) {
+    if (!w.kiosk_active || !w.hwnd) return;
+    RECT screen = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    HMONITOR mon = MonitorFromWindow(w.hwnd, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(mon, &mi)) screen = mi.rcMonitor;
+    InflateRect(&screen, -kCursorPadding, -kCursorPadding);
+    ClipCursor(&screen);
+}
+
 // Start: turn the windowed menu into the locked-down, full-screen kiosk.
 static void enterKiosk(Host *host) {
     if (!host) return;
@@ -826,6 +844,7 @@ static void enterKiosk(Host *host) {
     host->kiosk_active = true;
     g_kiosk_host = host;
     g_held_vks.clear();
+    applyKioskCursorClip(w);
     if (!g_keyboard_hook) {
         g_keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, lowLevelKeyboardProc, GetModuleHandleW(nullptr), 0);
     }
@@ -848,6 +867,7 @@ static void exitKioskToMenu(Host *host) {
 
     w.kiosk_active = false;
     host->kiosk_active = false;
+    ClipCursor(nullptr); // let the cursor roam the menu / other monitors again
     if (g_keyboard_hook) {
         UnhookWindowsHookEx(g_keyboard_hook);
         g_keyboard_hook = nullptr;
@@ -1533,6 +1553,8 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                         entry.second.main_controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
                     }
 #endif
+                    // Windows drops the cursor clip on focus loss; restore it.
+                    applyKioskCursorClip(entry.second);
                 }
             }
             return 0;
