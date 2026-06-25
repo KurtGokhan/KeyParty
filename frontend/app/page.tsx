@@ -638,6 +638,7 @@ export default function Home() {
             shapes: ["ring", "circle"],
             rainbow: true,
           });
+          shake = Math.min(shake + 16, 26);
           if (!repeat) {
             [0, 4, 7].forEach((s, k) =>
               tone(261.63 * Math.pow(2, s / 12) * 2, {
@@ -647,6 +648,10 @@ export default function Home() {
                 delay: k * 0.05,
               })
             );
+          }
+          if (!repeat || now - lastRepeatSound > 110) {
+            boom();
+            lastRepeatSound = now;
           }
           break;
         }
@@ -713,8 +718,10 @@ export default function Home() {
             maxR: Math.min(width, height) * 0.4,
           });
           burst(cx, cy, repeat ? 10 : 24, hue, { speed: 6, shapes: ["ring", "triangle"] });
+          shake = Math.min(shake + 16, 26);
           if (!repeat || now - lastRepeatSound > 70) {
             tone(520, { type: "square", dur: 0.22, gain: 0.12, glideTo: 180 });
+            boom();
             lastRepeatSound = now;
           }
           break;
@@ -977,6 +984,11 @@ export default function Home() {
       lastDragY = e.clientY;
       pointerBurst(e.clientX, e.clientY, true);
       tone(noteFreq(Math.floor(rand(0, 10)), 1), { type: "triangle", dur: 0.26, gain: 0.14 });
+      if (e.button === 2) {
+        // Right click gets the same screen shake + bassy boom as Space.
+        shake = Math.min(shake + 16, 26);
+        boom();
+      }
       tally();
     };
 
