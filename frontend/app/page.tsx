@@ -1387,12 +1387,21 @@ export default function Home() {
   const showAccess = hasNative === true && accessibility?.kioskEnabled;
   const showWebNote = isWeb;
 
-  // The quit chord's modifier names follow the host OS: Windows users know them
-  // as Ctrl + Alt, macOS as Control + Option. (os is null until mount; default
-  // to the macOS wording.) The keys are the same — only the labels differ.
+  // The quit chord's modifier labels follow the host OS. macOS keyboards print
+  // the glyphs (⌃ ⌥ ⇧) right on the keys, so we pair each name with its glyph;
+  // Windows keys are word-labelled, so only Shift has a familiar glyph there.
+  // (os is null until mount; default to the macOS pairing.)
   const quitMods = os === "windows"
-    ? (["Ctrl", "Alt", "Shift"] as const)
-    : (["Control", "Option", "Shift"] as const);
+    ? ([
+        { name: "Ctrl" },
+        { name: "Alt" },
+        { name: "Shift", icon: "⇧" },
+      ] as const)
+    : ([
+        { name: "Control", icon: "⌃" },
+        { name: "Option", icon: "⌥" },
+        { name: "Shift", icon: "⇧" },
+      ] as const);
 
   return (
     <div className={mode === "menu" ? "stage stage-menu" : "stage"}>
@@ -1404,7 +1413,15 @@ export default function Home() {
         <small>🎹 🌈 🎉 — or click and drag</small>
       </div>
       <div ref={hintRef} className="hint">
-        Grown-ups: hold <kbd>{quitMods[0]}</kbd> + <kbd>{quitMods[1]}</kbd> + <kbd>{quitMods[2]}</kbd> + <kbd>Q</kbd> to go back to the menu
+        {quitMods.map((m) => (
+          <kbd key={m.name}>
+            {"icon" in m && <span className="kbd-icon">{m.icon}</span>}
+            {m.name}
+          </kbd>
+        ))}
+        <kbd>Q</kbd>
+        <span className="hint-arrow">→</span>
+        <span className="hint-quit">🚪 QUIT</span>
       </div>
 
       {mode === "menu" && (
@@ -1452,7 +1469,7 @@ export default function Home() {
                       slip out of the game.
                     </span>
                     <button type="button" className="btn btn-grant" onClick={handleGrantAccess}>
-                      Grant Accessibility Access…
+                      ⚙️ Grant Accessibility Access…
                     </button>
                     <span className="access-hint">
                       Turn on “Key Party” in System Settings → Privacy &amp; Security → Accessibility,
@@ -1504,8 +1521,15 @@ export default function Home() {
             )}
 
             <p className="menu-foot">
-              While playing, press <kbd>{quitMods[0]}</kbd>+<kbd>{quitMods[1]}</kbd>+<kbd>{quitMods[2]}</kbd>+
-              <kbd>Q</kbd> to return here.
+              {quitMods.map((m) => (
+                <kbd key={m.name}>
+                  {"icon" in m && <span className="kbd-icon">{m.icon}</span>}
+                  {m.name}
+                </kbd>
+              ))}
+              <kbd>Q</kbd>
+              <span className="hint-arrow">→</span>
+              <span className="hint-quit">🚪 QUIT</span>
             </p>
 
             {isWeb && (

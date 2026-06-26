@@ -130,7 +130,7 @@ canvas {
   opacity: 1;
 }
 
-/* Small grown-ups-only quit hint. */
+/* Small quit hint: KEYS → QUIT. */
 .hint {
   position: absolute;
   left: 50%;
@@ -164,6 +164,23 @@ canvas {
 .hint.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+/* The glyph shown inside a chord key, just before its name (e.g. ⌃ Control). */
+.kbd-icon {
+  margin-right: 0.3em;
+  opacity: 0.8;
+}
+
+/* The arrow and QUIT label shared by the play hint and the menu footer. */
+.hint-arrow {
+  margin: 0 0.45em;
+  opacity: 0.6;
+}
+
+.hint-quit {
+  font-weight: 800;
+  letter-spacing: 0.04em;
 }
 
 /* While the menu is up, keep the play-only overlays from bleeding through its
