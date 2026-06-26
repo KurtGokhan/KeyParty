@@ -988,6 +988,9 @@ export default function Home() {
         // Right click gets the same screen shake + bassy boom as Space.
         shake = Math.min(shake + 16, 26);
         boom();
+      } else if (isTransparentMode()) {
+        // Left click sends out a blur shockwave in "transparent" mode.
+        spawnBlurRipple(e.clientX, e.clientY);
       }
       tally();
     };
