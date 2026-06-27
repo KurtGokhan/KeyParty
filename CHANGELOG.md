@@ -1,5 +1,28 @@
 # keyparty
 
+## 1.0.3
+
+### Patch Changes
+
+- e0060a5: More boom and ripple love for keys and mouse:
+
+  - Enter and Escape now trigger the screen shake and bassy boom
+  - Right click triggers the screen shake and bassy boom
+  - Left click sends out a blur ripple in transparent mode
+
+- 232f31f: Simpler, icon-forward quit hint:
+
+  - Drops the "Grown-ups…" wording — everyone can quit
+  - In-game and menu hints now read as a compact "keys → 🚪 QUIT" statement
+  - Chord keys show their glyph icon alongside the name (⌃ Control, ⌥ Option, ⇧ Shift)
+  - Adds a ⚙️ icon to the Grant Accessibility Access button
+
+- ee88b4d: A few fixes and improvements:
+
+  - Confines mouse in the playable area
+  - Adds boom effect to more keys
+  - Prevents opening dictation on MacOS
+
 ## 1.0.2
 
 ### Patch Changes

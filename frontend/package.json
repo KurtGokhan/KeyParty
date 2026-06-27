@@ -1,7 +1,7 @@
 {
   "name": "keyparty",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "license": "MIT",
   "scripts": {
     "dev": "next dev",
