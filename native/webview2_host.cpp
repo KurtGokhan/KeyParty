@@ -215,6 +215,9 @@ struct Host {
     // controller picks this up at creation. Persisted so kiosk enter/exit and resizes
     // keep it. Mirrors backdropMode in native/appkit_host.m.
     std::wstring backdrop_mode = L"transparent";
+    // Backdrop to restore when "unlock mouse" turns off (unlocking forces
+    // "transparent" so the user can see the apps behind the game).
+    std::wstring saved_backdrop_mode = L"transparent";
 #if ZERO_NATIVE_HAS_WEBVIEW2
     // Kept alive so the WebResourceRequested handler can build responses
     // (CreateWebResourceResponse lives on the environment).
@@ -517,7 +520,8 @@ static void showHostWindow(Window &w) {
 // Custom messages the keyboard hook posts to the main window's thread, so the
 // (latency-sensitive) low-level hook proc returns immediately.
 static constexpr UINT WM_KEYPARTY_KEY = WM_APP + 11;   // lparam = KeyMsg*
-static constexpr UINT WM_KEYPARTY_EXIT = WM_APP + 12;  // quit chord -> menu
+static constexpr UINT WM_KEYPARTY_EXIT = WM_APP + 12;  // menu chord -> emit keyparty:menuChord
+static constexpr UINT WM_KEYPARTY_SET_TRANSPARENT = WM_APP + 13;  // wparam: 1 = click-through
 
 // The bundled frontend is served from a virtual host mapped to the asset folder.
 static const wchar_t kAssetHost[] = L"keyparty.assets";
@@ -540,6 +544,15 @@ struct KeyMsg {
 static Host *g_kiosk_host = nullptr;
 static HHOOK g_keyboard_hook = nullptr;
 static std::set<DWORD> g_held_vks;
+
+// KeyParty "unlock mouse" passthrough. While active, the kiosk window is
+// click-through (WS_EX_TRANSPARENT) everywhere EXCEPT over the bar, so the mouse
+// reaches the apps behind it while the bar stays clickable; a low-level mouse
+// hook flips the bit as the cursor crosses the bar's edge. The keyboard hook
+// keeps swallowing + forwarding every key to the game throughout.
+static HHOOK g_mouse_hook = nullptr;
+static RECT g_bar_rect_screen = {};   // bar rect in screen px
+static bool g_mouse_passthrough = false;
 
 // Kiosk lockdown is on by default. Set KEYPARTY_NO_KIOSK=1 to develop without
 // the screen takeover and keyboard grab (mirrors the macOS host).
@@ -786,11 +799,34 @@ static LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
+// "Unlock mouse": as the cursor moves, flip the kiosk window between
+// click-through (over the canvas, so the click reaches the app behind) and
+// solid (over the bar, so the bar's buttons work). The hook never swallows the
+// event, so the click still lands. The window-style change is marshalled to the
+// UI thread via WM_KEYPARTY_SET_TRANSPARENT.
+static LRESULT CALLBACK lowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION && g_kiosk_host && g_mouse_passthrough) {
+        auto *p = reinterpret_cast<MSLLHOOKSTRUCT *>(lParam);
+        if (p) {
+            HWND hwnd = nullptr;
+            auto it = g_kiosk_host->windows.find(1);
+            if (it != g_kiosk_host->windows.end()) hwnd = it->second.hwnd;
+            if (hwnd) {
+                bool overBar = PtInRect(&g_bar_rect_screen, p->pt) != 0;
+                // transparent (click-through) everywhere except over the bar.
+                PostMessageW(hwnd, WM_KEYPARTY_SET_TRANSPARENT, overBar ? 0 : 1, 0);
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
 // Pin the cursor to the kiosk window's monitor so it can't wander off the game
 // view (onto a second monitor, the taskbar, etc.). Windows drops the clip when
 // the window loses focus, so this is reapplied on WM_SETFOCUS while in kiosk.
+// Skipped while the mouse is unlocked — the cursor must reach background apps.
 static void applyKioskCursorClip(Window &w) {
-    if (!w.kiosk_active || !w.hwnd) return;
+    if (!w.kiosk_active || g_mouse_passthrough || !w.hwnd) return;
     RECT screen = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
     HMONITOR mon = MonitorFromWindow(w.hwnd, MONITOR_DEFAULTTOPRIMARY);
     MONITORINFO mi = {};
@@ -872,25 +908,24 @@ static void exitKioskToMenu(Host *host) {
         UnhookWindowsHookEx(g_keyboard_hook);
         g_keyboard_hook = nullptr;
     }
+    // Clear any "unlock mouse" passthrough so the menu is fully clickable again.
+    if (g_mouse_hook) {
+        UnhookWindowsHookEx(g_mouse_hook);
+        g_mouse_hook = nullptr;
+    }
+    g_mouse_passthrough = false;
     g_kiosk_host = nullptr;
     g_held_vks.clear();
 
     if (w.hwnd) {
-        LONG_PTR style = w.saved_style ? w.saved_style : (LONG_PTR)(WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-        SetWindowLongPtrW(w.hwnd, GWL_STYLE, style);
+        // Stay borderless full-screen (the menu lives full-screen now), just drop
+        // back to the normal window level. Restoring saved_exstyle also clears any
+        // WS_EX_TRANSPARENT left from passthrough.
+        SetWindowLongPtrW(w.hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
         SetWindowLongPtrW(w.hwnd, GWL_EXSTYLE, w.saved_exstyle);
-        RECT r = w.saved_rect;
-        if (r.right - r.left < 200 || r.bottom - r.top < 150) {
-            int sw = GetSystemMetrics(SM_CXSCREEN);
-            int sh = GetSystemMetrics(SM_CYSCREEN);
-            int width = (int)w.width > 0 ? (int)w.width : (int)kMenuWidth;
-            int height = (int)w.height > 0 ? (int)w.height : (int)kMenuHeight;
-            r.left = (sw - width) / 2;
-            r.top = (sh - height) / 2;
-            r.right = r.left + width;
-            r.bottom = r.top + height;
-        }
-        SetWindowPos(w.hwnd, HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        SetWindowPos(w.hwnd, HWND_NOTOPMOST, 0, 0, sw, sh,
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
         SetForegroundWindow(w.hwnd);
 #if ZERO_NATIVE_HAS_WEBVIEW2
@@ -942,6 +977,62 @@ static void applyBackdrop(Host *host, const std::wstring &mode_in) {
 #endif
 }
 
+// Store the bar's rectangle (sent from the UI in page/CSS px, top-left origin)
+// in screen pixels, so the mouse hook can tell when the cursor is over the bar.
+// The web view fills the client area at (0,0), so page px == client px once
+// scaled by the window DPI; ClientToScreen then lifts it to screen space.
+static void setBarRect(Host *host, double x, double y, double width, double height) {
+    if (!host) return;
+    auto it = host->windows.find(1);
+    if (it == host->windows.end() || !it->second.hwnd) return;
+    HWND hwnd = it->second.hwnd;
+    double scale = (double)GetDpiForWindow(hwnd) / 96.0;
+    if (scale <= 0.0) scale = 1.0;
+    POINT tl = { (LONG)(x * scale), (LONG)(y * scale) };
+    POINT br = { (LONG)((x + width) * scale), (LONG)((y + height) * scale) };
+    ClientToScreen(hwnd, &tl);
+    ClientToScreen(hwnd, &br);
+    g_bar_rect_screen = { tl.x, tl.y, br.x, br.y };
+}
+
+// "Unlock mouse": let the cursor reach the apps behind the game while the
+// keyboard stays captured. The kiosk window stays topmost (so the bar floats
+// above whatever app the user clicks into) but becomes click-through everywhere
+// except over the bar — the mouse hook flips WS_EX_TRANSPARENT as the cursor
+// crosses the bar edge. Cursor clip is released and the backdrop forced
+// transparent so the user can see what they're aiming at. Mirror of
+// -setMousePassthrough: in native/appkit_host.m.
+static void setMousePassthrough(Host *host, bool on) {
+    if (!host) return;
+    auto it = host->windows.find(1);
+    if (it == host->windows.end() || !it->second.hwnd) return;
+    Window &w = it->second;
+    if (!w.kiosk_active) return;
+    if (g_mouse_passthrough == on) return;
+    g_mouse_passthrough = on;
+
+    if (on) {
+        ClipCursor(nullptr);
+        host->saved_backdrop_mode = host->backdrop_mode;
+        applyBackdrop(host, L"transparent");
+        if (!g_mouse_hook) {
+            g_mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, lowLevelMouseProc, GetModuleHandleW(nullptr), 0);
+        }
+        // The user just clicked the bar's "unlock" button, so the cursor is over
+        // the bar — start solid; the hook flips it as the cursor moves away.
+        PostMessageW(w.hwnd, WM_KEYPARTY_SET_TRANSPARENT, 0, 0);
+    } else {
+        if (g_mouse_hook) {
+            UnhookWindowsHookEx(g_mouse_hook);
+            g_mouse_hook = nullptr;
+        }
+        PostMessageW(w.hwnd, WM_KEYPARTY_SET_TRANSPARENT, 0, 0); // clear click-through
+        applyBackdrop(host, host->saved_backdrop_mode.empty() ? L"transparent" : host->saved_backdrop_mode);
+        applyKioskCursorClip(w);
+        SetForegroundWindow(w.hwnd);
+    }
+}
+
 // JS -> native control commands from window.keyparty.* .
 static void handleControlCommand(Host *host, const std::wstring &cmd) {
     if (!host) return;
@@ -956,6 +1047,23 @@ static void handleControlCommand(Host *host, const std::wstring &cmd) {
         emitAccessibilityStatus(host);
     } else if (cmd.rfind(L"backdrop:", 0) == 0) {
         applyBackdrop(host, cmd.substr(9));  // wcslen(L"backdrop:") == 9
+    } else if (cmd == L"returnToMenu") {
+        exitKioskToMenu(host);
+    } else if (cmd.rfind(L"barRect:", 0) == 0) {
+        // "barRect:x,y,width,height" in CSS px (page coordinates).
+        std::wstring rest = cmd.substr(8);  // wcslen(L"barRect:") == 8
+        double v[4] = {0, 0, 0, 0};
+        size_t pos = 0;
+        for (int i = 0; i < 4 && pos <= rest.size(); i++) {
+            size_t comma = rest.find(L',', pos);
+            std::wstring tok = rest.substr(pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos);
+            v[i] = wcstod(tok.c_str(), nullptr);
+            if (comma == std::wstring::npos) break;
+            pos = comma + 1;
+        }
+        setBarRect(host, v[0], v[1], v[2], v[3]);
+    } else if (cmd.rfind(L"mousePassthrough:", 0) == 0) {
+        setMousePassthrough(host, cmd.substr(17) == L"1");  // wcslen("mousePassthrough:") == 17
     }
 }
 
@@ -979,7 +1087,7 @@ static const wchar_t *keyPartyControlScript() {
     return LR"JS((function(){
 if(window.keyparty){return;}
 function post(cmd){try{if(window.chrome&&window.chrome.webview&&window.chrome.webview.postMessage){window.chrome.webview.postMessage(cmd);}}catch(e){}}
-Object.defineProperty(window,'keyparty',{value:Object.freeze({start:function(){post('start');},quit:function(){post('quit');},requestAccessibility:function(){post('requestAccessibility');},checkAccessibility:function(){post('checkAccessibility');},setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));}}),configurable:false});
+Object.defineProperty(window,'keyparty',{value:Object.freeze({start:function(){post('start');},quit:function(){post('quit');},requestAccessibility:function(){post('requestAccessibility');},checkAccessibility:function(){post('checkAccessibility');},setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));},returnToMenu:function(){post('returnToMenu');},setBarRect:function(r){r=r||{};post('barRect:'+[r.x||0,r.y||0,r.width||0,r.height||0].join(','));},setMousePassthrough:function(on){post('mousePassthrough:'+(on?'1':'0'));}}),configurable:false});
 })();)JS";
 }
 
@@ -1245,7 +1353,10 @@ static void ensureMainWebView(Host *host, uint64_t window_id) {
                                 CoTaskMemFree(raw);
                                 if (message == L"start" || message == L"quit" ||
                                     message == L"requestAccessibility" || message == L"checkAccessibility" ||
-                                    message.rfind(L"backdrop:", 0) == 0) {
+                                    message == L"returnToMenu" ||
+                                    message.rfind(L"backdrop:", 0) == 0 ||
+                                    message.rfind(L"barRect:", 0) == 0 ||
+                                    message.rfind(L"mousePassthrough:", 0) == 0) {
                                     handleControlCommand(host, message);
                                     return S_OK;
                                 }
@@ -1537,8 +1648,22 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             }
             return 0;
         case WM_KEYPARTY_EXIT:
-            if (host) exitKioskToMenu(host);
+            // The menu chord. The UI decides what it means (show the hidden bar,
+            // or — if the bar is already up — leave the game via the returnToMenu
+            // control command). We just forward it as an event.
+            if (host) emitMainEvent(host, L"keyparty:menuChord", L"{}");
             return 0;
+        case WM_KEYPARTY_SET_TRANSPARENT: {
+            // Toggle click-through for "unlock mouse" (posted by lowLevelMouseProc).
+            LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            LONG_PTR next = wparam ? (ex | WS_EX_TRANSPARENT) : (ex & ~WS_EX_TRANSPARENT);
+            if (next != ex) {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+                SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            return 0;
+        }
         case WM_SETFOCUS:
             if (host) {
                 for (auto &entry : host->windows) {
@@ -1633,15 +1758,30 @@ static bool createNativeWindow(Host *host, Window &window) {
     // (the dark caption/border) still renders normally over the composition content.
     ex_style = WS_EX_NOREDIRECTIONBITMAP;
 #endif
+    // The main window (id 1) opens full-screen and borderless (WS_POPUP) at the
+    // menu — the canvas fills the screen with a panel in the bottom half. It stays
+    // at the normal window level (not topmost) with no keyboard grab so the menu
+    // is freely operable; Start (enterKiosk) raises it to topmost + installs the
+    // keyboard hook, and the menu chord (exitKioskToMenu) drops it back. Secondary
+    // windows keep normal overlapped styling.
+    bool isMain = window.id == 1;
+    DWORD style = isMain ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+    int wx = CW_USEDEFAULT, wy = CW_USEDEFAULT, ww = (int)window.width, wh = (int)window.height;
+    if (isMain) {
+        wx = 0;
+        wy = 0;
+        ww = GetSystemMetrics(SM_CXSCREEN);
+        wh = GetSystemMetrics(SM_CYSCREEN);
+    }
     HWND hwnd = CreateWindowExW(
         ex_style,
         L"ZeroNativeWindowsHost",
         title.c_str(),
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        (int)window.width,
-        (int)window.height,
+        style,
+        wx,
+        wy,
+        ww,
+        wh,
         nullptr,
         nullptr,
         host->instance,

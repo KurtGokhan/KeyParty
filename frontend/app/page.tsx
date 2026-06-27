@@ -6,19 +6,22 @@ import { trackEvent } from "./analytics";
 /* ------------------------------------------------------------------ *
  * KeyParty — a key-smashing game for kids.
  *
- * The app opens at a small "menu" (Start / Quit / accessibility setup).
- * Pressing Start asks the native shell (see native/appkit_host.m) to enter
- * kiosk mode: full-screen, with a global event tap that swallows every OS
- * shortcut so nothing the child presses can quit the game, switch apps, or
- * poke the operating system. Swallowed keys are forwarded back to this UI as
- * a native "key" event, so even Cmd/Ctrl/Option chords and lone modifiers
- * still make something happen on screen. Clicks and drags paint too.
+ * The app opens full-screen at a "menu" shown as a panel in the bottom half,
+ * with a "Click anywhere to start" prompt over the canvas above it. Starting asks
+ * the native shell (see native/appkit_host.m) to enter kiosk mode: full-screen,
+ * with a global event tap that swallows every OS shortcut so nothing the child
+ * presses can quit the game, switch apps, or poke the operating system. Swallowed
+ * keys are forwarded back to this UI as a native "key" event, so even
+ * Cmd/Ctrl/Option chords and lone modifiers still make something happen on screen.
+ * Clicks and drags paint too. While playing, the menu collapses to a bottom bar
+ * (all the actions, including a "hide" button and "unlock mouse").
  *
  * Every key makes a different splash of color and a different sound. The
- * grown-up chord — Control + Option + Shift (all three) + Q, with no Command and
- * no other key down — leaves the game and returns to the menu (the native tap
- * drives it in kiosk; the DOM path below handles it in plain-browser /
- * KEYPARTY_NO_KIOSK dev mode).
+ * menu chord — Control + Option + Shift (all three) + Q, with no Command and no
+ * other key down — toggles the menu: it brings the bar back when hidden, and
+ * leaves the game (back to the start menu) when the bar is already showing. The
+ * native tap drives it in kiosk; the DOM path below handles it in plain-browser /
+ * KEYPARTY_NO_KIOSK dev mode.
  * ------------------------------------------------------------------ */
 
 type Mode = "menu" | "playing";
@@ -37,6 +40,16 @@ type KeyPartyBridge = {
   checkAccessibility?: () => void;
   // macOS only: switch the window background between solid / clear / blurred.
   setBackdrop?: (mode: BackdropMode) => void;
+  // Leave the running game and drop the kiosk back to the start menu (the menu
+  // chord, when the bar is already showing, routes through here).
+  returnToMenu?: () => void;
+  // Tell the native shell where the bottom menu bar sits (CSS px, viewport
+  // coordinates) so "unlock mouse" can keep the bar clickable while the rest of
+  // the window passes the mouse through to the apps behind it.
+  setBarRect?: (rect: { x: number; y: number; width: number; height: number }) => void;
+  // Toggle "unlock mouse": when on, the mouse reaches background apps but the
+  // keyboard still goes to the game.
+  setMousePassthrough?: (on: boolean) => void;
 };
 
 const keyPartyBridge = (): KeyPartyBridge | undefined =>
@@ -181,6 +194,17 @@ export default function Home() {
   // re-running the effect); React renders the menu off the `mode` state.
   const [mode, setMode] = useState<Mode>("menu");
   const modeRef = useRef<Mode>("menu");
+  // While playing, the menu collapses to a bottom bar. The bar can be hidden for
+  // a clean play surface; the menu chord brings it back (and, when it's already
+  // showing, leaves the game). `mouseUnlocked` reflects the "unlock mouse" toggle
+  // — the mouse reaches background apps while the keyboard stays on the game.
+  const [barVisible, setBarVisible] = useState(true);
+  const [mouseUnlocked, setMouseUnlocked] = useState(false);
+  const barVisibleRef = useRef(true);
+  const barRef = useRef<HTMLDivElement>(null);
+  // Latest-value ref for the menu-chord action, so the canvas effect's (run-once)
+  // native + DOM key listeners always call the current handler.
+  const menuChordRef = useRef<() => void>(() => {});
   // null = not yet determined (avoids flashing the wrong banner on first paint);
   // true = native shell present; false = plain browser build.
   const [hasNative, setHasNative] = useState<boolean | null>(null);
@@ -200,6 +224,40 @@ export default function Home() {
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    barVisibleRef.current = barVisible;
+  }, [barVisible]);
+
+  // Each time the game starts, the menu collapses to a fresh, visible, locked
+  // bar; leaving the game wipes the playing-only toggles.
+  useEffect(() => {
+    if (mode === "playing") {
+      setBarVisible(true);
+      setMouseUnlocked(false);
+    }
+  }, [mode]);
+
+  // Report the bar's on-screen rectangle to the native shell whenever it appears
+  // or the window resizes, so "unlock mouse" can keep the bar clickable while the
+  // rest of the window passes the mouse through. (Re-measured after the collapse/
+  // appear animation settles, too.)
+  useEffect(() => {
+    if (mode !== "playing" || !barVisible) return;
+    const report = () => {
+      const el = barRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      keyPartyBridge()?.setBarRect?.({ x: r.left, y: r.top, width: r.width, height: r.height });
+    };
+    report();
+    const settle = window.setTimeout(report, 360);
+    window.addEventListener("resize", report);
+    return () => {
+      window.clearTimeout(settle);
+      window.removeEventListener("resize", report);
+    };
+  }, [mode, barVisible]);
 
   // Detect the native shell and keep the Accessibility status fresh while the
   // menu is up, so "Grant Access…" flips to "ready" the moment the grown-up
@@ -259,6 +317,46 @@ export default function Home() {
     const kp = keyPartyBridge();
     if (kp?.quit) kp.quit();
     else window.close();
+  };
+
+  // Leave the game and return to the start menu. Drives the UI back immediately
+  // and asks the native shell to drop the kiosk lockdown.
+  const handleReturnToMenu = () => {
+    engineRef.current?.returnToMenu();
+    keyPartyBridge()?.returnToMenu?.();
+  };
+
+  // Bar button: hand the mouse to the background apps (keyboard stays on the
+  // game). The native shell keeps the bar itself clickable.
+  const handleToggleMouse = () => {
+    setMouseUnlocked((on) => {
+      const next = !on;
+      keyPartyBridge()?.setMousePassthrough?.(next);
+      return next;
+    });
+  };
+
+  // Bar button: hide the bar for a clean play surface. Re-lock the mouse first so
+  // a hidden bar always means a fully locked game; only the menu chord brings the
+  // bar back.
+  const handleHideBar = () => {
+    if (mouseUnlocked) {
+      keyPartyBridge()?.setMousePassthrough?.(false);
+      setMouseUnlocked(false);
+    }
+    setBarVisible(false);
+  };
+
+  // The menu chord: bar hidden → bring it back; bar showing → leave the game.
+  // Kept in a ref so the run-once canvas effect's listeners always see the
+  // current state.
+  menuChordRef.current = () => {
+    if (modeRef.current !== "playing") return;
+    if (!barVisibleRef.current) {
+      setBarVisible(true);
+    } else {
+      handleReturnToMenu();
+    }
   };
 
   const handleGrantAccess = () => {
@@ -903,7 +1001,7 @@ export default function Home() {
         e.code === "KeyQ" &&
         heldKeys.size === 0
       ) {
-        engineRef.current?.returnToMenu();
+        menuChordRef.current();
         return;
       }
       handleKey({
@@ -974,8 +1072,14 @@ export default function Home() {
       }
     };
 
+    // True when the pointer event landed on the menu bar (or panel) rather than
+    // the play surface, so we don't paint a burst behind the bar's buttons.
+    const onMenu = (e: Event) =>
+      !!(e.target as Element | null)?.closest?.(".menu");
+
     const onPointerDown = (e: PointerEvent) => {
       if (modeRef.current !== "playing") return; // menu clicks belong to the buttons
+      if (onMenu(e)) return; // clicking the bar shouldn't paint
       pointer.x = e.clientX;
       pointer.y = e.clientY;
       pointer.active = true;
@@ -997,6 +1101,7 @@ export default function Home() {
 
     const onPointerMove = (e: PointerEvent) => {
       if (modeRef.current !== "playing") return; // no canvas cursor/paint over the menu
+      if (onMenu(e)) return; // ignore moves over the bar
       pointer.x = e.clientX;
       pointer.y = e.clientY;
       pointer.vis = true;
@@ -1081,14 +1186,20 @@ export default function Home() {
       const d = (detail ?? {}) as Partial<AccessibilityStatus>;
       setAccessibility({ trusted: !!d.trusted, kioskEnabled: !!d.kioskEnabled });
     };
+    // The menu chord (Ctrl+Opt+Shift+Q) arrives from the native tap as this
+    // event; the UI decides what it means (show the bar, or leave the game).
+    const onNativeMenuChord = () => menuChordRef.current();
     zero?.on?.("keyparty:menu", onNativeMenu);
+    zero?.on?.("keyparty:menuChord", onNativeMenuChord);
     zero?.on?.("keyparty:playing", onNativePlaying);
     zero?.on?.("keyparty:accessibility", onNativeAccessibility);
     const onNativeMenuEvent = () => returnToMenu();
+    const onNativeMenuChordEvent = () => menuChordRef.current();
     const onNativePlayingEvent = () => enterPlaying();
     const onNativeAccessibilityEvent = (e: Event) =>
       onNativeAccessibility((e as CustomEvent).detail);
     window.addEventListener("zero-native:keyparty:menu", onNativeMenuEvent);
+    window.addEventListener("zero-native:keyparty:menuChord", onNativeMenuChordEvent);
     window.addEventListener("zero-native:keyparty:playing", onNativePlayingEvent);
     window.addEventListener("zero-native:keyparty:accessibility", onNativeAccessibilityEvent);
 
@@ -1369,6 +1480,7 @@ export default function Home() {
       window.removeEventListener("zero-native:keyup", onNativeKeyUpEvent as EventListener);
       window.removeEventListener("zero-native:hint", showHint as EventListener);
       window.removeEventListener("zero-native:keyparty:menu", onNativeMenuEvent);
+      window.removeEventListener("zero-native:keyparty:menuChord", onNativeMenuChordEvent);
       window.removeEventListener("zero-native:keyparty:playing", onNativePlayingEvent);
       window.removeEventListener("zero-native:keyparty:accessibility", onNativeAccessibilityEvent);
       engineRef.current = null;
@@ -1421,11 +1533,77 @@ export default function Home() {
         ))}
         <kbd>Q</kbd>
         <span className="hint-arrow">→</span>
-        <span className="hint-quit">🚪 QUIT</span>
+        <span className="hint-quit">📋 MENU</span>
       </div>
 
+      {/* Menu mode: a prompt over the canvas; clicking anywhere (outside the
+          bottom panel) starts the game. The catcher sits below the panel so the
+          panel's own buttons keep working. */}
       {mode === "menu" && (
-        <div className="menu" role="dialog" aria-modal="true" aria-label="Key Party menu">
+        <div className="start-catcher" onClick={handleStart}>
+          <div className="start-menu-prompt">
+            Click anywhere to start
+            <small>🎹 🌈 🎉</small>
+          </div>
+        </div>
+      )}
+
+      {/* The menu: a panel in the bottom half before play, collapsing to a thin
+          bar at the bottom while playing. The bar can be hidden (clean play
+          surface); the menu chord brings it back. */}
+      <div
+        ref={barRef}
+        className={
+          "menu " +
+          (mode === "menu" ? "is-panel" : "is-bar") +
+          (mode === "playing" && !barVisible ? " is-hidden" : "")
+        }
+        role={mode === "menu" ? "dialog" : "toolbar"}
+        aria-label="Key Party menu"
+      >
+        {mode === "playing" ? (
+          <div className="menu-bar">
+            {/* macOS only: cycle the window background solid → blurry → transparent. */}
+            {canBackdrop && (
+              <button
+                type="button"
+                className="bar-btn"
+                aria-pressed={backdrop !== "solid"}
+                onClick={handleCycleBackdrop}
+              >
+                🪟 {backdrop}
+              </button>
+            )}
+            {/* Unlock mouse: hand the mouse to background apps; keys stay on the
+                game. Only meaningful with the native shell. */}
+            {hasNative && (
+              <button
+                type="button"
+                className="bar-btn"
+                aria-pressed={mouseUnlocked}
+                onClick={handleToggleMouse}
+              >
+                {mouseUnlocked ? "🖱️ Lock mouse" : "🖱️ Unlock mouse"}
+              </button>
+            )}
+            <button type="button" className="bar-btn" onClick={handleReturnToMenu}>
+              📋 Menu
+            </button>
+            {!isWeb && (
+              <button type="button" className="bar-btn" onClick={handleQuit}>
+                ✕ Quit
+              </button>
+            )}
+            <button
+              type="button"
+              className="bar-btn bar-hide"
+              onClick={handleHideBar}
+              aria-label="Hide menu bar"
+            >
+              ▾ Hide
+            </button>
+          </div>
+        ) : (
           <div className="menu-card">
             <h1 className="menu-title">Key Party</h1>
             <p className="menu-sub">A key-smashing party for little hands 🎹🌈🎉</p>
@@ -1529,7 +1707,7 @@ export default function Home() {
               ))}
               <kbd>Q</kbd>
               <span className="hint-arrow">→</span>
-              <span className="hint-quit">🚪 QUIT</span>
+              <span className="hint-quit">📋 MENU</span>
             </p>
 
             {isWeb && (
@@ -1538,8 +1716,8 @@ export default function Home() {
               </a>
             )}
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

@@ -194,17 +194,144 @@ canvas {
    It's a normal, fully-interactive screen (mouse + keyboard) — the kiosk
    keyboard lockdown is only active while playing. */
 .menu {
-  position: absolute;
-  inset: 0;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: radial-gradient(circle at 50% 28%, rgba(54, 22, 104, 0.6), rgba(9, 4, 24, 0.94));
-  backdrop-filter: blur(3px);
   /* The menu owns its own (normal) cursor — the star wand is for the game. */
   cursor: default;
+  /* Collapse (panel → bar), hide, and reappear all animate from here. We animate
+     height for the collapse and transform/opacity for the hide. */
+  transition: height 0.45s cubic-bezier(0.22, 0.61, 0.36, 1),
+    transform 0.4s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.35s ease;
+  will-change: height, transform;
+}
+
+/* Before play: a panel filling the bottom half, behind which the canvas shows
+   the "click anywhere to start" prompt. Slides up on first paint. */
+.menu.is-panel {
+  height: 54vh;
+  padding: clamp(16px, 3vh, 32px) 24px;
+  overflow-y: auto;
+  background: linear-gradient(
+    to top,
+    rgba(9, 4, 24, 0.96),
+    rgba(20, 9, 46, 0.86) 60%,
+    rgba(20, 9, 46, 0)
+  );
+  animation: menu-rise 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@keyframes menu-rise {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* While playing: a thin bar pinned to the bottom. */
+.menu.is-bar {
+  height: clamp(56px, 9vh, 76px);
+  padding: 0 clamp(10px, 2vw, 22px);
+  background: rgba(10, 4, 28, 0.82);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(8px);
+}
+
+/* Hidden bar: slid off the bottom edge. Brought back only by the menu chord. */
+.menu.is-hidden {
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The horizontal row of bar actions. */
+.menu-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: clamp(8px, 1.4vw, 16px);
+  width: 100%;
+}
+
+.bar-btn {
+  font-family: inherit;
+  font-weight: 800;
+  font-size: clamp(0.85rem, 1.8vw, 1.05rem);
+  padding: 0.5em 1.1em;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.12s ease, filter 0.12s ease, background 0.12s ease;
+}
+
+.bar-btn:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.08);
+}
+
+.bar-btn:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.bar-btn:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+
+/* Toggle buttons (background mode, unlock mouse) light up when active. */
+.bar-btn[aria-pressed="true"] {
+  background: rgba(95, 184, 255, 0.24);
+  border-color: rgba(95, 184, 255, 0.55);
+}
+
+.bar-hide {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Full-bleed click target shown in menu mode: clicking the canvas (anywhere
+   outside the bottom panel) starts the game. Sits below the panel (z 10). */
+.start-catcher {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Centre the prompt in the top portion, above the bottom-half panel. */
+  padding-bottom: 54vh;
+  cursor: pointer;
+}
+
+/* "Click anywhere to start" prompt over the canvas. */
+.start-menu-prompt {
+  text-align: center;
+  pointer-events: none;
+  font-weight: 800;
+  font-size: clamp(1.6rem, 5vw, 3.6rem);
+  color: #fff;
+  text-shadow: 0 0 24px rgba(255, 255, 255, 0.35), 0 8px 30px rgba(0, 0, 0, 0.5);
+  animation: bob 1.6s ease-in-out infinite;
+}
+
+.start-menu-prompt small {
+  display: block;
+  margin-top: 0.5em;
+  font-size: 0.42em;
+  font-weight: 700;
+  opacity: 0.85;
 }
 
 .menu-card {
@@ -324,18 +451,15 @@ html.kp-transparent .stage {
   background: rgba(11, 4, 32, 0.06) !important;
 }
 
-html.kp-blurry .menu,
-html.kp-transparent .menu {
-  background: transparent;
-}
-
+/* The panel/bar keep their own translucent backgrounds over the desktop (so they
+   stay readable); only the card gets a touch more opacity for legibility. */
 html.kp-blurry .menu-card,
 html.kp-transparent .menu-card {
   background: rgba(18, 8, 40, 0.92);
 }
 
-/* "transparent" = the raw desktop, sharp. Kill the UI's own backdrop blurs
-   (.menu, .hint) so nothing softens the desktop showing through behind them. */
+/* "transparent" = the raw desktop, sharp. Kill the bar's backdrop blur so nothing
+   softens the desktop showing through behind it. */
 html.kp-transparent .menu,
 html.kp-transparent .hint {
   backdrop-filter: none;

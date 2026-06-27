@@ -74,6 +74,10 @@ static NSString *ZeroNativeKeyPartyControlScript(void);
 // forwards each key to the game. Defined near the bottom of this file.
 static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo);
 static NSRect constrainFrame(NSRect frame);
+// KeyParty: the full-screen frame the menu and the kiosk both occupy. Overshoots
+// every screen edge by 2px so no desktop strip (e.g. the menu-bar reveal band)
+// peeks out from under the window.
+static NSRect ZeroNativeKeyPartyFullScreenFrame(NSScreen *screen);
 static NSString *ZeroNativeAppKitBridgeScript(void);
 static NSString *ZeroNativeMimeTypeForPath(NSString *path);
 static NSString *ZeroNativeResolvedAssetRoot(NSString *rootPath);
@@ -180,6 +184,17 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 // padding band; the tap warps the cursor back inside whenever it escapes.
 @property(nonatomic, assign) BOOL cursorConfineActive;
 @property(nonatomic, assign) CGRect cursorConfineRect;
+// KeyParty: "unlock mouse" passthrough (kiosk only). While active, the kiosk
+// window passes mouse events through to the apps behind it EXCEPT over the
+// menu bar (so the bar's own buttons — including "lock mouse" — stay clickable).
+// The keyboard tap keeps swallowing + forwarding every key to the game, so the
+// keyboard stays locked to the game while the mouse roams. barRectGlobal is the
+// bar's rectangle in global (CG, top-left origin) coordinates, sent from the UI;
+// savedBackdropMode remembers the backdrop to restore when the mouse re-locks
+// (unlocking forces "transparent" so the user can see what they're clicking).
+@property(nonatomic, assign) BOOL mousePassthroughActive;
+@property(nonatomic, assign) CGRect barRectGlobal;
+@property(nonatomic, copy) NSString *savedBackdropMode;
 // KeyParty: optional see-through background, driven from the menu via
 // window.keyparty.setBackdrop(mode). Modes: "solid" (opaque deep-purple chrome),
 // "blurry" and "transparent" — both make the window non-opaque so the real
@@ -238,6 +253,8 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (BOOL)handleShortcutEvent:(NSEvent *)event;
 - (void)enterKiosk;
 - (void)exitKioskToMenu;
+- (void)setMousePassthrough:(BOOL)on;
+- (void)setBarRectFromPageX:(double)x y:(double)y width:(double)width height:(double)height;
 - (void)handleKeyPartyControlCommand:(NSString *)command;
 - (void)applyBackdrop:(NSString *)mode;
 - (void)emitAccessibilityStatus;
@@ -453,25 +470,31 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
         rect = constrainFrame(rect);
     }
 
-    // KeyParty always opens in a small windowed "menu" (Start / Quit /
-    // accessibility setup). Kiosk lockdown happens later, at runtime, when the
-    // grown-up presses Start (-enterKiosk) and is undone by the quit chord
-    // (-exitKioskToMenu). The menu always uses a fixed, centred size — we never
-    // restore a saved (possibly full-screen, from a prior kiosk run) frame for
-    // it — so the app reliably starts as a small window.
+    // KeyParty opens full-screen at the "menu" (Start / Quit / accessibility
+    // setup, shown as a panel in the bottom half over the live canvas). The menu
+    // window is borderless and full-screen but stays at the NORMAL window level
+    // with no keyboard lockdown — so a grown-up can still Cmd-Tab to System
+    // Settings to grant Accessibility. Kiosk lockdown (shield level, event tap,
+    // presentation lockdown) is layered on later when Start is pressed
+    // (-enterKiosk) and peeled back by the menu chord (-exitKioskToMenu); the
+    // window stays full-screen borderless throughout.
     BOOL isMainWindow = makeMain && windowId == 1;
     if (isMainWindow) {
-        rect = NSMakeRect(0, 0, ZeroNativeKeyPartyMenuWidth, ZeroNativeKeyPartyMenuHeight);
+        rect = ZeroNativeKeyPartyFullScreenFrame([NSScreen mainScreen]);
     }
 
-    NSWindowStyleMask styleMask = (NSWindowStyleMaskTitled |
-                                   NSWindowStyleMaskClosable |
-                                   NSWindowStyleMaskResizable |
-                                   NSWindowStyleMaskMiniaturizable);
+    NSWindowStyleMask styleMask = isMainWindow
+        ? NSWindowStyleMaskBorderless
+        : (NSWindowStyleMaskTitled |
+           NSWindowStyleMaskClosable |
+           NSWindowStyleMaskResizable |
+           NSWindowStyleMaskMiniaturizable);
 
-    // The main window is always a ZeroNativeKioskWindow so it can later become a
-    // borderless full-screen window without AppKit shoving its frame below the
-    // menu bar (see -constrainFrameRect:). Child windows keep normal styling.
+    // The main window is always a ZeroNativeKioskWindow so it can be a borderless
+    // full-screen window (and later rise to shield level) without AppKit shoving
+    // its frame below the menu bar (see -constrainFrameRect:). It also overrides
+    // canBecomeKeyWindow so the borderless window can still take key/main. Child
+    // windows keep normal styling.
     NSWindow *window = isMainWindow
         ? [[ZeroNativeKioskWindow alloc] initWithContentRect:rect
                                                    styleMask:styleMask
@@ -482,8 +505,13 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
                                         backing:NSBackingStoreBuffered
                                           defer:NO];
     [window setTitle:(title.length > 0 ? title : self.appName)];
-    if (isMainWindow || !restoreFrame) {
+    // The full-screen main window is positioned explicitly; only non-restored
+    // child windows get centred.
+    if (!isMainWindow && !restoreFrame) {
         [window center];
+    }
+    if (isMainWindow) {
+        [window setFrame:rect display:NO];
     }
 
     // KeyParty: dark window chrome to match the game's deep-purple stage (#0b0420).
@@ -915,6 +943,12 @@ static BOOL ZeroNativeKeyPartyKioskEnabled(void) {
     return YES;
 }
 
+static NSRect ZeroNativeKeyPartyFullScreenFrame(NSScreen *screen) {
+    NSScreen *target = screen ?: [NSScreen mainScreen];
+    NSRect r = target ? target.frame : NSMakeRect(0, 0, 1280, 800);
+    return NSInsetRect(r, -2.0, -2.0);
+}
+
 static NSRect constrainFrame(NSRect frame) {
     NSScreen *screen = [NSScreen mainScreen];
     if (!screen) return frame;
@@ -1015,7 +1049,10 @@ static NSString *ZeroNativeKeyPartyControlScript(void) {
         "quit:function(){post('quit');},"
         "requestAccessibility:function(){post('requestAccessibility');},"
         "checkAccessibility:function(){post('checkAccessibility');},"
-        "setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));}"
+        "setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));},"
+        "returnToMenu:function(){post('returnToMenu');},"
+        "setBarRect:function(r){r=r||{};post('barRect:'+[r.x||0,r.y||0,r.width||0,r.height||0].join(','));},"
+        "setMousePassthrough:function(on){post('mousePassthrough:'+(on?'1':'0'));}"
         "}),configurable:false});"
         "})();";
 }
@@ -1490,6 +1527,22 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         [self emitAccessibilityStatus];
     } else if ([command hasPrefix:@"backdrop:"]) {
         [self applyBackdrop:[command substringFromIndex:[@"backdrop:" length]]];
+    } else if ([command isEqualToString:@"returnToMenu"]) {
+        // The menu chord, when the bar is already showing, asks the UI to leave
+        // the game — the UI calls this to drop the kiosk back to the start menu.
+        [self exitKioskToMenu];
+    } else if ([command hasPrefix:@"barRect:"]) {
+        // "barRect:x,y,width,height" in CSS px (page coordinates). Used to keep
+        // the bar clickable while the rest of the window passes the mouse through.
+        NSArray<NSString *> *parts = [[command substringFromIndex:[@"barRect:" length]] componentsSeparatedByString:@","];
+        if (parts.count == 4) {
+            [self setBarRectFromPageX:parts[0].doubleValue
+                                    y:parts[1].doubleValue
+                                width:parts[2].doubleValue
+                               height:parts[3].doubleValue];
+        }
+    } else if ([command hasPrefix:@"mousePassthrough:"]) {
+        [self setMousePassthrough:[[command substringFromIndex:[@"mousePassthrough:" length]] isEqualToString:@"1"]];
     }
 }
 
@@ -1617,6 +1670,9 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     if (!self.kioskActive) return;
     self.kioskActive = NO;
     self.cursorConfineActive = NO; // let the cursor roam the menu / other monitors again
+    // Clear any "unlock mouse" passthrough so the menu is fully clickable again.
+    self.mousePassthroughActive = NO;
+    self.window.ignoresMouseEvents = NO;
 
     // Release the keyboard lockdown so the menu is fully operable again.
     [self removeGlobalEventTap];
@@ -1636,23 +1692,19 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
         } @catch (NSException *ignored) {
             (void)ignored;
         }
+        // Drop back to the NORMAL window level, but stay borderless full-screen —
+        // the menu lives full-screen now (canvas + bottom panel), the same frame
+        // the kiosk used. Demoting the level (plus the presentation reset above)
+        // un-shields the window so Cmd-Tab / System Settings work again.
         window.level = NSNormalWindowLevel;
         window.collectionBehavior = NSWindowCollectionBehaviorDefault;
-        window.styleMask = (NSWindowStyleMaskTitled |
-                            NSWindowStyleMaskClosable |
-                            NSWindowStyleMaskResizable |
-                            NSWindowStyleMaskMiniaturizable);
-        window.titleVisibility = NSWindowTitleVisible;
-        window.titlebarAppearsTransparent = NO;
-        window.movable = YES;
+        window.styleMask = NSWindowStyleMaskBorderless;
+        window.titleVisibility = NSWindowTitleHidden;
+        window.titlebarAppearsTransparent = YES;
+        window.movable = NO;
         window.movableByWindowBackground = NO;
-        [window setTitle:self.appName];
-        NSRect frame = self.windowedFrame;
-        if (frame.size.width < 200 || frame.size.height < 150) {
-            frame = NSMakeRect(0, 0, ZeroNativeKeyPartyMenuWidth, ZeroNativeKeyPartyMenuHeight);
-        }
+        NSRect frame = ZeroNativeKeyPartyFullScreenFrame(window.screen);
         [window setFrame:frame display:YES];
-        [window center];
         [window makeKeyAndOrderFront:nil];
         [NSApp activate];
     }
@@ -1661,6 +1713,57 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     [self emitResizeForWindowId:1];
     [self emitWindowFrameForWindowId:1 open:YES];
     [self scheduleFrame];
+}
+
+// Store the menu bar's rectangle (sent from the UI in page/CSS pixels, top-left
+// origin) in global CG coordinates so the event tap can tell when the cursor is
+// over the bar. The kiosk window fills the display, so page (0,0) maps to the
+// display's top-left — the same CGDisplayBounds space the tap's locations and the
+// cursor-confine rect already use.
+- (void)setBarRectFromPageX:(double)x y:(double)y width:(double)width height:(double)height {
+    NSScreen *screen = self.window.screen ?: [NSScreen mainScreen];
+    NSNumber *screenNumber = screen.deviceDescription[@"NSScreenNumber"];
+    uint32_t displayID = screenNumber ? (uint32_t)screenNumber.unsignedIntValue : CGMainDisplayID();
+    CGRect db = CGDisplayBounds(displayID);
+    self.barRectGlobal = CGRectMake(db.origin.x + x, db.origin.y + y, width, height);
+}
+
+// "Unlock mouse": let the cursor reach the apps behind the game while the
+// keyboard stays captured by the game. The kiosk window keeps its shield level
+// (so the bar floats above any app the user clicks into) but becomes
+// click-through everywhere EXCEPT over the bar — the tap flips
+// ignoresMouseEvents as the cursor crosses the bar edge (see
+// ZeroNativeEventTapCallback). Cursor confinement is lifted and the backdrop is
+// forced transparent so the user can see what they're aiming at; the previous
+// backdrop is restored on re-lock. The keyboard tap is untouched, so every key
+// still goes to the game.
+- (void)setMousePassthrough:(BOOL)on {
+    if (!self.kioskActive) return;
+    if (self.mousePassthroughActive == on) return;
+    self.mousePassthroughActive = on;
+    NSWindow *window = self.window;
+
+    if (on) {
+        self.cursorConfineActive = NO;
+        self.savedBackdropMode = self.backdropMode ?: @"transparent";
+        [self applyBackdrop:@"transparent"];
+        // Relax the kiosk lockdown so a clicked background app can take focus.
+        @try {
+            [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+        } @catch (NSException *ignored) {
+            (void)ignored;
+        }
+        // The user just clicked the bar's "unlock" button, so the cursor is over
+        // the bar — start non-passthrough; the tap takes over as it moves away.
+        window.ignoresMouseEvents = NO;
+    } else {
+        window.ignoresMouseEvents = NO;
+        self.cursorConfineActive = YES;
+        [self applyBackdrop:(self.savedBackdropMode ?: @"transparent")];
+        [self applyKioskPresentation];
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activate];
+    }
 }
 
 - (void)applyKioskPresentation {
@@ -1817,7 +1920,9 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     // swallow plain keys, so it can't track which other keys are held — the
     // global tap path enforces the "nothing else held" rule.)
     if (ctrl && opt && shift && !cmd && event.keyCode == 12) {
-        [self exitKioskToMenu];
+        // Forward the chord to the UI (same as the global tap path) instead of
+        // exiting directly — the UI decides between "show the bar" and "leave".
+        [self emitEventNamed:@"keyparty:menuChord" detailJSON:@"{}" windowId:1];
         return YES;
     }
 
@@ -1999,6 +2104,23 @@ static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType 
     // when it had escaped, warp the hardware cursor back. Re-associating right
     // after the warp cancels the post-warp event-suppression window so motion
     // stays smooth instead of the cursor briefly freezing at the edge.
+    // "Unlock mouse": the window is click-through everywhere except over the bar.
+    // Flip ignoresMouseEvents as the cursor crosses the bar's edge (this fires on
+    // every move, which always precedes a click, so the click lands on the right
+    // side). No cursor confinement while unlocked. Keyboard handling below is
+    // untouched, so keys still reach the game.
+    if (host.mousePassthroughActive &&
+        (type == kCGEventMouseMoved ||
+         type == kCGEventLeftMouseDragged ||
+         type == kCGEventRightMouseDragged ||
+         type == kCGEventOtherMouseDragged)) {
+        BOOL overBar = CGRectContainsPoint(host.barRectGlobal, CGEventGetLocation(event));
+        dispatch_async(dispatch_get_main_queue(), ^{
+            host.window.ignoresMouseEvents = !overBar;
+        });
+        return event;
+    }
+
     if (host.cursorConfineActive &&
         (type == kCGEventMouseMoved ||
          type == kCGEventLeftMouseDragged ||
@@ -2042,8 +2164,12 @@ static CGEventRef ZeroNativeEventTapCallback(CGEventTapProxy proxy, CGEventType 
             if (held.unsignedShortValue != 12) { onlyQHeld = NO; break; }
         }
         if (ctrl && alt && shift && !cmd && keyCode == 12 && onlyQHeld) {
+            // The chord no longer exits directly. The UI decides what it means:
+            // if the menu bar is hidden it brings the bar back; if the bar is
+            // already showing it leaves the game (calling window.keyparty.returnToMenu,
+            // which drives -exitKioskToMenu). We just forward the chord as an event.
             dispatch_async(dispatch_get_main_queue(), ^{
-                [host exitKioskToMenu];
+                [host emitEventNamed:@"keyparty:menuChord" detailJSON:@"{}" windowId:1];
             });
             return NULL;
         }
