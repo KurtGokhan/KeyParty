@@ -584,3 +584,49 @@ html.kp-blurry .stage {
   font-family: inherit;
   font-weight: 800;
 }
+
+/* ----------------------------- icons ----------------------------- */
+/* react-icons (GameIcons) render as 1em SVGs. Lay the buttons and labels
+   that carry one out as inline-flex so the glyph sits centred next to its
+   text instead of on the baseline, and bump the icon a touch above 1em so
+   it reads as confidently as the old emoji did. */
+.btn,
+.bar-btn,
+.btn-download,
+.repo-link,
+.hint-quit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45em;
+}
+
+.btn > svg,
+.bar-btn > svg,
+.btn-download > svg,
+.repo-link > svg,
+.hint-quit > svg {
+  flex: none;
+  width: 1.15em;
+  height: 1.15em;
+}
+
+/* The play hint is a single non-wrapping pill; keep its menu glyph inline
+   with the surrounding kbd chips rather than forcing its own flex row. */
+.hint .hint-quit {
+  display: inline-flex;
+}
+
+/* Icons dropped inline inside a sentence (the access + web notes). */
+.inline-icon {
+  vertical-align: -0.15em;
+  margin-right: 0.15em;
+}
+
+/* The piano / rainbow / party trio that decorates the playful headings. */
+.party-trio {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  vertical-align: -0.15em;
+}

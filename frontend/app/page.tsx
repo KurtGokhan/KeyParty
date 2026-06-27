@@ -1,6 +1,23 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import {
+  GiPlayButton,
+  GiExitDoor,
+  GiWindow,
+  GiMouse,
+  GiHamburgerMenu,
+  GiPadlock,
+  GiHazardSign,
+  GiCog,
+  GiWorld,
+  GiCloudDownload,
+  GiPianoKeys,
+  GiRainbowStar,
+  GiPartyPopper,
+} from "react-icons/gi";
+import { LuChevronDown } from "react-icons/lu";
+import { FaGithub } from "react-icons/fa";
 import { trackEvent } from "./analytics";
 
 /* ------------------------------------------------------------------ *
@@ -180,6 +197,16 @@ const modifierFamily = (code: string): string => {
   if (code === "Fn") return "Fn";
   return "Shift";
 };
+
+// The piano / rainbow / party trio that decorates the playful headings, as
+// GameIcons rather than emoji so it renders identically on every platform.
+const PartyTrio = () => (
+  <span className="party-trio" aria-hidden="true">
+    <GiPianoKeys />
+    <GiRainbowStar />
+    <GiPartyPopper />
+  </span>
+);
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1522,7 +1549,7 @@ export default function Home() {
       <div ref={counterRef} className="counter">0</div>
       <div ref={startRef} className="start">
         Smash any key!
-        <small>🎹 🌈 🎉 — or click and drag</small>
+        <small><PartyTrio /> — or click and drag</small>
       </div>
       <div ref={hintRef} className="hint">
         {quitMods.map((m) => (
@@ -1533,7 +1560,7 @@ export default function Home() {
         ))}
         <kbd>Q</kbd>
         <span className="hint-arrow">→</span>
-        <span className="hint-quit">📋 MENU</span>
+        <span className="hint-quit"><GiHamburgerMenu /> MENU</span>
       </div>
 
       {/* Menu mode: a prompt over the canvas; clicking anywhere (outside the
@@ -1543,7 +1570,7 @@ export default function Home() {
         <div className="start-catcher" onClick={handleStart}>
           <div className="start-menu-prompt">
             Click anywhere to start
-            <small>🎹 🌈 🎉</small>
+            <small><PartyTrio /></small>
           </div>
         </div>
       )}
@@ -1571,7 +1598,7 @@ export default function Home() {
                 aria-pressed={backdrop !== "solid"}
                 onClick={handleCycleBackdrop}
               >
-                🪟 {backdrop}
+                <GiWindow /> {backdrop}
               </button>
             )}
             {/* Unlock mouse: hand the mouse to background apps; keys stay on the
@@ -1583,15 +1610,15 @@ export default function Home() {
                 aria-pressed={mouseUnlocked}
                 onClick={handleToggleMouse}
               >
-                {mouseUnlocked ? "🖱️ Lock mouse" : "🖱️ Unlock mouse"}
+                <GiMouse /> {mouseUnlocked ? "Lock mouse" : "Unlock mouse"}
               </button>
             )}
             <button type="button" className="bar-btn" onClick={handleReturnToMenu}>
-              📋 Menu
+              <GiHamburgerMenu /> Menu
             </button>
             {!isWeb && (
               <button type="button" className="bar-btn" onClick={handleQuit}>
-                ✕ Quit
+                <GiExitDoor /> Quit
               </button>
             )}
             <button
@@ -1600,23 +1627,23 @@ export default function Home() {
               onClick={handleHideBar}
               aria-label="Hide menu bar"
             >
-              ▾ Hide
+              <LuChevronDown /> Hide
             </button>
           </div>
         ) : (
           <div className="menu-card">
             <h1 className="menu-title">Key Party</h1>
-            <p className="menu-sub">A key-smashing party for little hands 🎹🌈🎉</p>
+            <p className="menu-sub">A key-smashing party for little hands <PartyTrio /></p>
 
             <div className="menu-actions">
               <button type="button" className="btn btn-start" onClick={handleStart} autoFocus>
-                ▶ Start
+                <GiPlayButton /> Start
               </button>
               {/* Quit closes the native app; in the browser there's nothing to
                   quit (and window.close() is a no-op for normal tabs), so hide it. */}
               {!isWeb && (
                 <button type="button" className="btn btn-quit" onClick={handleQuit}>
-                  ✕ Quit
+                  <GiExitDoor /> Quit
                 </button>
               )}
             </div>
@@ -1629,7 +1656,7 @@ export default function Home() {
                 aria-pressed={backdrop !== "solid"}
                 onClick={handleCycleBackdrop}
               >
-                🪟 Background: {backdrop}
+                <GiWindow /> Background: {backdrop}
               </button>
             )}
 
@@ -1637,17 +1664,17 @@ export default function Home() {
               <div className={`access ${accessibility?.trusted ? "ok" : "warn"}`}>
                 {accessibility?.trusted ? (
                   <span className="access-line">
-                    🔒 Keyboard lock ready — every key is safe to smash.
+                    <GiPadlock className="inline-icon" /> Keyboard lock ready — every key is safe to smash.
                   </span>
                 ) : (
                   <>
                     <span className="access-line">
-                      ⚠ Key Party needs <strong>Accessibility</strong> permission so it can lock the
+                      <GiHazardSign className="inline-icon" /> Key Party needs <strong>Accessibility</strong> permission so it can lock the
                       keyboard while playing — otherwise a child could press a system shortcut and
                       slip out of the game.
                     </span>
                     <button type="button" className="btn btn-grant" onClick={handleGrantAccess}>
-                      ⚙️ Grant Accessibility Access…
+                      <GiCog /> Grant Accessibility Access…
                     </button>
                     <span className="access-hint">
                       Turn on “Key Party” in System Settings → Privacy &amp; Security → Accessibility,
@@ -1661,7 +1688,7 @@ export default function Home() {
             {showWebNote && (
               <div className="web-note">
                 <span className="access-line">
-                  🌐 You’re playing in the browser. Key Party works best as the desktop app —
+                  <GiWorld className="inline-icon" /> You’re playing in the browser. Key Party works best as the desktop app —
                   the browser can’t lock the keyboard, so a child can still press a shortcut and
                   slip out of the game.
                 </span>
@@ -1669,7 +1696,7 @@ export default function Home() {
                   {os === "windows" ? (
                     <>
                       <a className="btn btn-download" href={DOWNLOADS.windows} target="_blank" rel="noreferrer" onClick={handleDownload("windows")}>
-                        ⬇ Download for Windows
+                        <GiCloudDownload /> Download for Windows
                       </a>
                       <a className="dl-alt" href={DOWNLOADS.mac} target="_blank" rel="noreferrer" onClick={handleDownload("mac")}>
                         or the macOS version
@@ -1678,7 +1705,7 @@ export default function Home() {
                   ) : os === "mac" ? (
                     <>
                       <a className="btn btn-download" href={DOWNLOADS.mac} target="_blank" rel="noreferrer" onClick={handleDownload("mac")}>
-                        ⬇ Download for macOS
+                        <GiCloudDownload /> Download for macOS
                       </a>
                       <a className="dl-alt" href={DOWNLOADS.windows} target="_blank" rel="noreferrer" onClick={handleDownload("windows")}>
                         or the Windows version
@@ -1687,10 +1714,10 @@ export default function Home() {
                   ) : (
                     <>
                       <a className="btn btn-download" href={DOWNLOADS.mac} target="_blank" rel="noreferrer" onClick={handleDownload("mac")}>
-                        ⬇ macOS
+                        <GiCloudDownload /> macOS
                       </a>
                       <a className="btn btn-download" href={DOWNLOADS.windows} target="_blank" rel="noreferrer" onClick={handleDownload("windows")}>
-                        ⬇ Windows
+                        <GiCloudDownload /> Windows
                       </a>
                     </>
                   )}
@@ -1707,12 +1734,12 @@ export default function Home() {
               ))}
               <kbd>Q</kbd>
               <span className="hint-arrow">→</span>
-              <span className="hint-quit">📋 MENU</span>
+              <span className="hint-quit"><GiHamburgerMenu /> MENU</span>
             </p>
 
             {isWeb && (
               <a className="repo-link" href={REPO_URL} target="_blank" rel="noreferrer" onClick={() => trackEvent("view_repo")}>
-                View on GitHub ↗
+                <FaGithub /> View on GitHub ↗
               </a>
             )}
           </div>
