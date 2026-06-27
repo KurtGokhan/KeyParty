@@ -1050,18 +1050,25 @@ static void handleControlCommand(Host *host, const std::wstring &cmd) {
     } else if (cmd == L"returnToMenu") {
         exitKioskToMenu(host);
     } else if (cmd.rfind(L"barRect:", 0) == 0) {
-        // "barRect:x,y,width,height" in CSS px (page coordinates).
+        // "barRect:x,y,width,height" — integers in CSS px (page coordinates).
+        // Parse digits by hand to avoid the CRT wcstod/wcstol import (not available
+        // as an import lib under the MSVC/UCRT toolchain we link against).
         std::wstring rest = cmd.substr(8);  // wcslen(L"barRect:") == 8
-        double v[4] = {0, 0, 0, 0};
+        long v[4] = {0, 0, 0, 0};
         size_t pos = 0;
         for (int i = 0; i < 4 && pos <= rest.size(); i++) {
             size_t comma = rest.find(L',', pos);
             std::wstring tok = rest.substr(pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos);
-            v[i] = wcstod(tok.c_str(), nullptr);
+            long val = 0;
+            bool neg = false;
+            size_t j = 0;
+            if (j < tok.size() && (tok[j] == L'-' || tok[j] == L'+')) { neg = tok[j] == L'-'; j++; }
+            for (; j < tok.size() && tok[j] >= L'0' && tok[j] <= L'9'; j++) val = val * 10 + (tok[j] - L'0');
+            v[i] = neg ? -val : val;
             if (comma == std::wstring::npos) break;
             pos = comma + 1;
         }
-        setBarRect(host, v[0], v[1], v[2], v[3]);
+        setBarRect(host, (double)v[0], (double)v[1], (double)v[2], (double)v[3]);
     } else if (cmd.rfind(L"mousePassthrough:", 0) == 0) {
         setMousePassthrough(host, cmd.substr(17) == L"1");  // wcslen("mousePassthrough:") == 17
     }
@@ -1087,7 +1094,7 @@ static const wchar_t *keyPartyControlScript() {
     return LR"JS((function(){
 if(window.keyparty){return;}
 function post(cmd){try{if(window.chrome&&window.chrome.webview&&window.chrome.webview.postMessage){window.chrome.webview.postMessage(cmd);}}catch(e){}}
-Object.defineProperty(window,'keyparty',{value:Object.freeze({start:function(){post('start');},quit:function(){post('quit');},requestAccessibility:function(){post('requestAccessibility');},checkAccessibility:function(){post('checkAccessibility');},setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));},returnToMenu:function(){post('returnToMenu');},setBarRect:function(r){r=r||{};post('barRect:'+[r.x||0,r.y||0,r.width||0,r.height||0].join(','));},setMousePassthrough:function(on){post('mousePassthrough:'+(on?'1':'0'));}}),configurable:false});
+Object.defineProperty(window,'keyparty',{value:Object.freeze({start:function(){post('start');},quit:function(){post('quit');},requestAccessibility:function(){post('requestAccessibility');},checkAccessibility:function(){post('checkAccessibility');},setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));},returnToMenu:function(){post('returnToMenu');},setBarRect:function(r){r=r||{};post('barRect:'+[r.x||0,r.y||0,r.width||0,r.height||0].map(function(n){return Math.round(n);}).join(','));},setMousePassthrough:function(on){post('mousePassthrough:'+(on?'1':'0'));}}),configurable:false});
 })();)JS";
 }
 

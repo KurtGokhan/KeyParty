@@ -1051,7 +1051,7 @@ static NSString *ZeroNativeKeyPartyControlScript(void) {
         "checkAccessibility:function(){post('checkAccessibility');},"
         "setBackdrop:function(mode){post('backdrop:'+String(mode||'solid'));},"
         "returnToMenu:function(){post('returnToMenu');},"
-        "setBarRect:function(r){r=r||{};post('barRect:'+[r.x||0,r.y||0,r.width||0,r.height||0].join(','));},"
+        "setBarRect:function(r){r=r||{};post('barRect:'+[r.x||0,r.y||0,r.width||0,r.height||0].map(function(n){return Math.round(n);}).join(','));},"
         "setMousePassthrough:function(on){post('mousePassthrough:'+(on?'1':'0'));}"
         "}),configurable:false});"
         "})();";

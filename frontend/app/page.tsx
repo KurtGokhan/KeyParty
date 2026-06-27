@@ -914,6 +914,10 @@ export default function Home() {
     /* --------------------------- the hint -------------------------- */
     let hintTimer: number | undefined;
     const showHint = () => {
+      // When the menu bar is showing, the chord hint is redundant (the bar has a
+      // visible Menu button) — only flash it once the bar is hidden, to remind the
+      // grown-up how to bring it back.
+      if (barVisibleRef.current) return;
       const el = hintRef.current;
       if (!el) return;
       el.classList.add("show");
