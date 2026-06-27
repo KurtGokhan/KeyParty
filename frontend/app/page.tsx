@@ -24,7 +24,7 @@ import { trackEvent } from "./analytics";
  * KeyParty — a key-smashing game for kids.
  *
  * The app opens full-screen at a "menu" shown as a panel in the bottom half,
- * with a "Click anywhere to start" prompt over the canvas above it. Starting asks
+ * with a "Click to start" prompt over the canvas above it. Starting asks
  * the native shell (see native/appkit_host.m) to enter kiosk mode: full-screen,
  * with a global event tap that swallows every OS shortcut so nothing the child
  * presses can quit the game, switch apps, or poke the operating system. Swallowed
@@ -1569,7 +1569,7 @@ export default function Home() {
       {mode === "menu" && (
         <div className="start-catcher" onClick={handleStart}>
           <div className="start-menu-prompt">
-            Click anywhere to start
+            Click to start
             <small><PartyTrio /></small>
           </div>
         </div>
@@ -1688,7 +1688,7 @@ export default function Home() {
             {showWebNote && (
               <div className="web-note">
                 <span className="access-line">
-                  <GiWorld className="inline-icon" /> You’re playing in the browser. Key Party works best as the desktop app —
+                  You’re playing in the browser. Key Party works best as the desktop app —
                   the browser can’t lock the keyboard, so a child can still press a shortcut and
                   slip out of the game.
                 </span>

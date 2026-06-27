@@ -211,16 +211,18 @@ canvas {
   will-change: height, transform;
 }
 
-/* Before play: a panel filling the bottom half, behind which the canvas shows
-   the "click anywhere to start" prompt. Slides up on first paint. */
+/* Before play: a panel anchored to the bottom, only as tall as its content,
+   behind which the canvas shows the "click anywhere to start" prompt. Slides up
+   on first paint. */
 .menu.is-panel {
-  height: 54vh;
-  padding: clamp(16px, 3vh, 32px) 24px;
+  height: auto;
+  max-height: 82vh;
+  padding: clamp(16px, 3vh, 32px) 24px clamp(20px, 4vh, 40px);
   overflow-y: auto;
   background: linear-gradient(
     to top,
     rgba(9, 4, 24, 0.96),
-    rgba(20, 9, 46, 0.86) 60%,
+    rgba(20, 9, 46, 0.86) 70%,
     rgba(20, 9, 46, 0)
   );
   animation: menu-rise 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both;
@@ -310,8 +312,9 @@ canvas {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* Centre the prompt in the top portion, above the bottom-half panel. */
-  padding-bottom: 54vh;
+  /* Bias the prompt toward the upper area so it sits clear of the bottom panel
+     (which is only as tall as its content). */
+  padding-bottom: clamp(200px, 30vh, 380px);
   cursor: pointer;
 }
 
@@ -332,6 +335,25 @@ canvas {
   font-size: 0.42em;
   font-weight: 700;
   opacity: 0.85;
+}
+
+/* Short screens: the bottom panel would leave no room for the prompt above it
+   (they'd overlap), so centre the menu like a modal and drop the prompt — the
+   click-to-start target still covers everything outside the centred card. */
+@media (max-height: 640px) {
+  .start-menu-prompt {
+    display: none;
+  }
+  .menu.is-panel {
+    top: 0;
+    max-height: 100%;
+    align-items: center;
+    background: radial-gradient(
+      circle at 50% 45%,
+      rgba(40, 18, 82, 0.62),
+      rgba(9, 4, 24, 0.94)
+    );
+  }
 }
 
 .menu-card {
