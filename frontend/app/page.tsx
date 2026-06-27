@@ -221,6 +221,11 @@ export default function Home() {
   // re-running the effect); React renders the menu off the `mode` state.
   const [mode, setMode] = useState<Mode>("menu");
   const modeRef = useRef<Mode>("menu");
+  // Web build only: after a download click we swap the menu for a "thanks"
+  // screen. It deliberately offers no way back into the game — playing in the
+  // browser, right after grabbing the desktop app, is exactly the confusing
+  // path we want to avoid. Only "Back to menu" leaves this screen.
+  const [thanked, setThanked] = useState(false);
   // While playing, the menu collapses to a bottom bar. The bar can be hidden for
   // a clean play surface; the menu chord brings it back (and, when it's already
   // showing, leaves the game). `mouseUnlocked` reflects the "unlock mouse" toggle
@@ -393,8 +398,15 @@ export default function Home() {
   // The download + repo links only render in the web build, which is exactly
   // where GA is active — so these are the user actions worth measuring (the app
   // store of this kids' game is "did the visitor grab the desktop app?").
-  const handleDownload = (target: "mac" | "windows") => () =>
+  const handleDownload = (target: "mac" | "windows") => () => {
     trackEvent("download_app", { os: target });
+    // Swap to the thank-you screen. The download itself proceeds via the link's
+    // own navigation (target="_blank"); this only changes what's behind it.
+    setThanked(true);
+  };
+
+  // Leave the thank-you screen and return to the start menu.
+  const handleBackToMenu = () => setThanked(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1570,7 +1582,7 @@ export default function Home() {
       {/* Menu mode: a prompt over the canvas; clicking anywhere (outside the
           bottom panel) starts the game. The catcher sits below the panel so the
           panel's own buttons keep working. */}
-      {mode === "menu" && (
+      {mode === "menu" && !thanked && (
         <div className="start-catcher" onClick={handleStart}>
           <div className="start-menu-prompt">
             Click to start
@@ -1633,6 +1645,24 @@ export default function Home() {
             >
               <LuChevronDown /> Hide
             </button>
+          </div>
+        ) : thanked ? (
+          <div className="menu-card">
+            <h1 className="menu-title">Thank you!</h1>
+            <p className="menu-sub">
+              Your download is on its way <PartyTrio />
+            </p>
+            <div className="web-note">
+              <span className="access-line">
+                Once it finishes, open Key Party from your desktop — that’s the version
+                that can lock the keyboard so little hands can smash away safely.
+              </span>
+            </div>
+            <div className="menu-actions">
+              <button type="button" className="btn btn-quit" onClick={handleBackToMenu} autoFocus>
+                <GiHamburgerMenu /> Back to menu
+              </button>
+            </div>
           </div>
         ) : (
           <div className="menu-card">
